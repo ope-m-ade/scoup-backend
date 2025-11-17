@@ -1,0 +1,13 @@
+ services:
+  - type: web
+    name: scoup-backend
+    env: python
+    buildCommand: "./build.sh"
+    startCommand: "gunicorn scoupdb.wsgi:application"
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: scoupdb.settings
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: False
