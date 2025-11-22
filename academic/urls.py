@@ -1,7 +1,7 @@
 from django.urls import path
 from . import views
 from django.urls import path
-from .views import FacultyListCreateView, faculty_me, MyPapersListCreateView
+from .views import FacultyListCreateView, faculty_me, MyPapersListCreateView, MyProjectsListCreateView, MyPatentsListCreateView
 from django.urls import path
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
@@ -19,4 +19,6 @@ urlpatterns = [
 	path("token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
 	path("faculty/papers/", MyPapersListCreateView.as_view(), name="my-papers"),
+	path("faculty/projects/", MyProjectsListCreateView.as_view()),
+    path("faculty/patents/", MyPatentsListCreateView.as_view()),
 ]

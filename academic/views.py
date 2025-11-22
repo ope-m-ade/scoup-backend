@@ -1,6 +1,5 @@
 
 import uuid
-
 from rest_framework import generics
 from .models import Faculty, Paper, Patent, Project
 from .serializers import FacultySerializer, PaperSerializer, ProjectSerializer, PatentSerializer, FacultySignupSerializer
@@ -138,15 +137,40 @@ def faculty_me(request):
             return Response(serializer.data)
         return Response(serializer.errors, status=400)
 
+
+# ----------------------------------------
+# PAPERS for logged-in faculty
+# ----------------------------------------
 class MyPapersListCreateView(generics.ListCreateAPIView):
     serializer_class = PaperSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # Only return papers authored by the logged-in faculty member
         return Paper.objects.filter(authors=self.request.user.faculty_profile)
 
     def perform_create(self, serializer):
-        # Create the paper and assign the logged-in faculty as an author
         paper = serializer.save()
         paper.authors.add(self.request.user.faculty_profile)
+        paper.save()
+
+
+class MyProjectsListCreateView(generics.ListCreateAPIView):
+    serializer_class = ProjectSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Project.objects.filter(faculty=self.request.user.faculty_profile)
+
+    def perform_create(self, serializer):
+        serializer.save(faculty=self.request.user.faculty_profile)
+
+
+class MyPatentsListCreateView(generics.ListCreateAPIView):
+    serializer_class = PatentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Patent.objects.filter(faculty=self.request.user.faculty_profile)
+
+    def perform_create(self, serializer):
+        serializer.save(faculty=self.request.user.faculty_profile)

@@ -1,6 +1,5 @@
 from pathlib import Path
 import os
-import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -66,11 +65,10 @@ WSGI_APPLICATION = 'scoupdb.wsgi.application'
 
 # DATABASE — local = SQLite, Render = Postgres
 DATABASES = {
-    "default": dj_database_url.config(
-        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
-        conn_max_age=600,
-        ssl_require=not DEBUG,
-    )
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
 }
 
 
@@ -97,6 +95,10 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:5173",
     "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
 ]
 
 CSRF_TRUSTED_ORIGINS = [
@@ -104,6 +106,10 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:5173",
     "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
 ]
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

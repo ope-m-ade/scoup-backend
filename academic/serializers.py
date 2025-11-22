@@ -19,11 +19,13 @@ class ProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = '__all__'
+        read_only_fields = ('faculty',)
 
 class PatentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Patent
         fields = '__all__'
+        read_only_fields = ('faculty',)
 
 class FacultySignupSerializer(serializers.ModelSerializer):
     username = serializers.CharField(write_only=True)
