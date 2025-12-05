@@ -66,14 +66,16 @@ WSGI_APPLICATION = 'scoupdb.wsgi.application'
 
 # DATABASE — local = SQLite, Render = Postgres
 # settings.py
-
 DATABASES = {
     "default": dj_database_url.config(
-        default=os.environ.get("DATABASE_URL"),
+        default="sqlite:///db.sqlite3",    # fallback for local dev
         conn_max_age=600,
-        ssl_require=True
+        ssl_require=os.environ.get("RENDER", False)
     )
 }
+
+if os.environ.get("RENDER"):
+    DEBUG = False
 
 
 AUTH_PASSWORD_VALIDATORS = [
