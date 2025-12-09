@@ -7,7 +7,14 @@ from .models import Faculty, Paper, Patent, Project
 class FacultySerializer(serializers.ModelSerializer):
     class Meta:
         model = Faculty
-        fields = '__all__'
+        fields = "__all__"
+        read_only_fields = ["user"]
+
+class FacultyProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Faculty
+        fields = "__all__"
+        read_only_fields = ["user", "faculty_id", "created_at", "updated_at"]
 
 class PaperSerializer(serializers.ModelSerializer):
     class Meta:
@@ -67,3 +74,26 @@ class FacultySignupSerializer(serializers.ModelSerializer):
         )
 
         return faculty
+
+from rest_framework.views import APIView
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+
+class FacultyPhotoUploadView(APIView):
+    parser_classes = (MultiPartParser, FormParser)
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        faculty = request.user.faculty_profile
+        photo = request.data.get("photo")
+
+        if not photo:
+            return Response({"error": "No photo uploaded"}, status=400)
+
+        faculty.photo = photo
+        faculty.save()
+
+        return Response({
+            "photo": request.build_absolute_uri(faculty.photo.url)
+        })

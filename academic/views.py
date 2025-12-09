@@ -2,7 +2,14 @@
 import uuid
 from rest_framework import generics
 from .models import Faculty, Paper, Patent, Project
-from .serializers import FacultySerializer, PaperSerializer, ProjectSerializer, PatentSerializer, FacultySignupSerializer
+from .serializers import (
+    FacultySerializer,
+    FacultyProfileSerializer,
+    PaperSerializer,
+    ProjectSerializer,
+    PatentSerializer,
+    FacultySignupSerializer
+)
 from django.shortcuts import render
 from rest_framework.response import Response
 from rest_framework import status
@@ -23,7 +30,6 @@ class FacultyListCreateView(generics.ListCreateAPIView):
         return Faculty.objects.filter(is_approved=True, profile_visibility=True)
         
     serializer_class = FacultySerializer
-
 
 class PaperListCreateView(generics.ListCreateAPIView):
     queryset = Paper.objects.all()
@@ -112,30 +118,12 @@ class FacultyDashboardView(generics.RetrieveAPIView):
         return self.request.user.faculty_profile
 
 
-@api_view(['GET', 'PATCH'])
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def faculty_me(request):
-    try:
-        faculty = Faculty.objects.get(user=request.user)
-    except Faculty.DoesNotExist:
-        return Response({"error": "Faculty profile not found"}, status=404)
-
-    # --- GET: return profile ---
-    if request.method == "GET":
-        serializer = FacultySerializer(faculty)
-        return Response(serializer.data)
-
-    # --- PATCH: update profile ---
-    if request.method == "PATCH":
-        serializer = FacultySerializer(
-            faculty,
-            data=request.data,
-            partial=True   # allows partial update
-        )
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=400)
+    faculty = request.user.faculty_profile
+    serializer = FacultyProfileSerializer(faculty)
+    return Response(serializer.data)
 
 
 # ----------------------------------------
@@ -174,3 +162,85 @@ class MyPatentsListCreateView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         serializer.save(faculty=self.request.user.faculty_profile)
+
+
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+
+class FacultyPhotoUploadView(APIView):
+    parser_classes = (MultiPartParser, FormParser)
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        faculty = request.user.faculty_profile  # FIXED
+        photo = request.data.get("photo")
+
+        if not photo:
+            return Response({"error": "No photo uploaded"}, status=400)
+
+        faculty.photo = photo
+        faculty.save()
+
+        return Response({
+            "message": "Photo updated",
+            "photo": request.build_absolute_uri(faculty.photo.url)
+        })
+
+# ============================
+# Upload CV + Extract Papers
+# ============================
+
+from rest_framework.parsers import MultiPartParser, FormParser
+import pdfplumber
+
+class FacultyUploadCVPapers(APIView):
+    parser_classes = (MultiPartParser, FormParser)
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        faculty = request.user.faculty_profile
+        file = request.FILES.get("file")
+
+        if not file:
+            return Response({"error": "No PDF uploaded"}, status=400)
+
+        # --- Extract text from PDF using pdfplumber ---
+        try:
+            with pdfplumber.open(file) as pdf:
+                full_text = "\n".join([page.extract_text() or "" for page in pdf.pages])
+        except Exception as e:
+            return Response({"error": f"PDF extract error: {str(e)}"}, status=400)
+
+        # --- VERY basic paper extraction (title + DOI) ---
+        import re
+        entries = []
+
+        # DOI pattern
+        doi_pattern = r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+"
+
+        # Try matching papers (very rough first version)
+        for line in full_text.split("\n"):
+            doi_match = re.search(doi_pattern, line)
+            if doi_match:
+                entries.append({
+                    "title": line.replace(doi_match.group(), "").strip(),
+                    "doi": doi_match.group()
+                })
+
+        # Create Paper objects
+        created = []
+        for item in entries:
+            paper, _ = Paper.objects.get_or_create(
+                doi=item["doi"],
+                defaults={"title": item["title"] or "Untitled Paper"}
+            )
+            paper.authors.add(faculty)
+            created.append({"title": paper.title, "doi": paper.doi})
+
+        return Response({
+            "message": "PDF processed",
+            "papers_found": len(created),
+            "papers": created
+        })
