@@ -100,6 +100,7 @@ FRONTEND_ORIGINS = [
     "http://localhost:5173",
     "https://scoup-frontend.vercel.app",
     "https://scoup-frontend-gfuswkjyy-ope-m-ades-projects.vercel.app",
+    "https://scoup-frontend-2-0.vercel.app",
 ]
 
 CORS_ALLOWED_ORIGINS = FRONTEND_ORIGINS
