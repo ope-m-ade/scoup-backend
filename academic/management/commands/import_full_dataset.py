@@ -116,6 +116,8 @@ class Command(BaseCommand):
                     updated_fac += 1
 
                 fac.name = name
+                fac.is_approved = True
+                fac.profile_visibility = True
                 fac.total_citations   = rec.get("total_citations") or 0
                 fac.article_count     = rec.get("article_count") or 0
                 fac.average_citations = float(rec.get("average_citations") or 0.0)

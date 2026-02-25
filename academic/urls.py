@@ -2,33 +2,60 @@ from django.urls import path
 from django.conf import settings
 from django.conf.urls.static import static
 from . import views
+from .auth import EmailOrUsernameTokenObtainPairView
 from .views import (
+    approve_faculty_suggestion,
     FacultyListCreateView,
+    FacultyDetailView,
     faculty_me,
-    MyPapersListCreateView,
-    MyProjectsListCreateView,
-    MyPatentsListCreateView,
+    faculty_me_suggestions,
+    faculty_suggestion_preview,
+    public_search_data,
+    reject_faculty_suggestion,
+    PaperListCreateView,
+    PaperDetailView,
+    ProjectListCreateView,
+    ProjectDetailView,
+    PatentListCreateView,
+    PatentDetailView,
     FacultyPhotoUploadView,
     FacultyUploadCVPapers,
 )
 from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
     TokenRefreshView,
 )
 urlpatterns = [
     path('', views.home, name='home'),
+    path("public/search-data/", public_search_data, name="public-search-data"),
 
     path('faculty/', FacultyListCreateView.as_view(), name='faculty-list'),
+    path('faculty/<int:pk>/', FacultyDetailView.as_view(), name='faculty-detail'),
     path('faculty/me/', faculty_me, name='faculty_me'),
-    path("papers/", views.MyPapersListCreateView.as_view(), name="my-papers"),
-    path("projects/", views.MyProjectsListCreateView.as_view(), name="my-projects"),
-    path("patents/", views.MyPatentsListCreateView.as_view(), name="my-patents"),
+    path("faculty/me/suggestions/", faculty_me_suggestions, name="faculty-me-suggestions"),
+    path(
+        "faculty/me/suggestions/<int:external_faculty_id>/approve/",
+        approve_faculty_suggestion,
+        name="faculty-suggestion-approve",
+    ),
+    path(
+        "faculty/me/suggestions/<int:external_faculty_id>/preview/",
+        faculty_suggestion_preview,
+        name="faculty-suggestion-preview",
+    ),
+    path(
+        "faculty/me/suggestions/<int:external_faculty_id>/reject/",
+        reject_faculty_suggestion,
+        name="faculty-suggestion-reject",
+    ),
+    path("papers/", PaperListCreateView.as_view(), name="paper-list"),
+    path("papers/<int:pk>/", PaperDetailView.as_view(), name="paper-detail"),
+    path("projects/", ProjectListCreateView.as_view(), name="project-list"),
+    path("projects/<int:pk>/", ProjectDetailView.as_view(), name="project-detail"),
+    path("patents/", PatentListCreateView.as_view(), name="patent-list"),
+    path("patents/<int:pk>/", PatentDetailView.as_view(), name="patent-detail"),
     path("faculty/signup/", views.faculty_signup, name="faculty_signup"),
-    path("token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("token/", EmailOrUsernameTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
-    path("faculty/papers/", MyPapersListCreateView.as_view(), name="my-papers"),
-    path("faculty/projects/", MyProjectsListCreateView.as_view()),
-    path("faculty/patents/", MyPatentsListCreateView.as_view()),
     path("faculty/upload-photo/", FacultyPhotoUploadView.as_view()),
-path("faculty/upload-cv-papers/", FacultyUploadCVPapers.as_view(), name="upload-cv-papers"),
+    path("faculty/upload-cv-papers/", FacultyUploadCVPapers.as_view(), name="upload-cv-papers"),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
