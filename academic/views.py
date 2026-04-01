@@ -6,6 +6,7 @@ import pdfplumber
 from django.contrib.auth.models import User
 from django.db import transaction
 from django.db.models import Q
+from django.db.utils import OperationalError
 from django.http import HttpResponse
 from rest_framework import filters, generics, status
 from rest_framework.decorators import api_view, permission_classes
@@ -30,6 +31,7 @@ from .serializers import (
     PatentSerializer,
     ProjectSerializer,
 )
+from .semantic import cosine_similarity, create_query_embedding
 
 
 def _normalize_keyword_list(value):
@@ -128,6 +130,27 @@ def _absorb_external_faculty(internal, external):
     internal.dois = _merge_unique_list(internal.dois, external.dois)
     internal.titles = _merge_unique_list(internal.titles, external.titles)
     internal.categories = _merge_unique_list(internal.categories, external.categories)
+    internal.top_level_categories = _merge_unique_list(
+        internal.top_level_categories, external.top_level_categories
+    )
+    internal.mid_level_categories = _merge_unique_list(
+        internal.mid_level_categories, external.mid_level_categories
+    )
+    internal.low_level_categories = _merge_unique_list(
+        internal.low_level_categories, external.low_level_categories
+    )
+    internal.category_urls = _merge_unique_list(internal.category_urls, external.category_urls)
+    internal.top_category_urls = _merge_unique_list(
+        internal.top_category_urls, external.top_category_urls
+    )
+    internal.mid_category_urls = _merge_unique_list(
+        internal.mid_category_urls, external.mid_category_urls
+    )
+    internal.low_category_urls = _merge_unique_list(
+        internal.low_category_urls, external.low_category_urls
+    )
+    internal.themes = _merge_unique_list(internal.themes, external.themes)
+    internal.journals = _merge_unique_list(internal.journals, external.journals)
     internal.keywords = _merge_unique_list(internal.keywords, external.keywords)
     internal.faculty_keywords = ", ".join(
         _merge_unique_list(internal.faculty_keywords, external.faculty_keywords)
@@ -135,6 +158,13 @@ def _absorb_external_faculty(internal, external):
     internal.ai_keywords = ", ".join(
         _merge_unique_list(internal.ai_keywords, external.ai_keywords)
     )
+
+    merged_source_profile = {}
+    if isinstance(external.source_profile, dict):
+        merged_source_profile.update(external.source_profile)
+    if isinstance(internal.source_profile, dict):
+        merged_source_profile.update(internal.source_profile)
+    internal.source_profile = merged_source_profile
     internal.total_citations = max(internal.total_citations or 0, external.total_citations or 0)
     internal.article_count = max(internal.article_count or 0, external.article_count or 0)
     internal.average_citations = max(
@@ -279,23 +309,31 @@ def _get_request_faculty(user, create_if_missing=False):
 @permission_classes([AllowAny])
 def public_search_data(request):
     faculty_qs = (
-        Faculty.objects.filter(is_approved=True, profile_visibility=True)
-        .prefetch_related("papers", "projects", "patents")
+        Faculty.objects.filter(profile_visibility=True)
+        .filter(Q(is_approved=True) | Q(user__isnull=False))
+        .prefetch_related("projects", "patents")
+        .select_related("user")
         .order_by("last_name", "first_name")
     )
-    papers_qs = Paper.objects.all().prefetch_related("authors").order_by("-id")
+    papers_qs = (
+        Paper.objects.defer("paper_embedding", "embedding_model", "embedding_updated_at")
+        .prefetch_related("authors")
+        .order_by("-id")
+    )
     projects_qs = Project.objects.all().prefetch_related("faculty").order_by("-id")
     patents_qs = Patent.objects.all().prefetch_related("faculty").order_by("-id")
 
     faculty = []
     for item in faculty_qs:
-        full_name = (
-            item.name
-            or f"{(item.first_name or '').strip()} {(item.last_name or '').strip()}".strip()
+        user_first_name = (item.user.first_name if item.user else "") or ""
+        user_last_name = (item.user.last_name if item.user else "") or ""
+        user_username = (item.user.username if item.user else "") or ""
+        full_name = _full_name(
+            item.first_name or user_first_name,
+            item.last_name or user_last_name,
+            (item.name or "").strip() or user_username or item.email or item.faculty_id,
         )
-        merged_keywords = _normalize_keyword_list(item.keywords) or _normalize_keyword_list(
-            item.faculty_keywords
-        )
+        merged_keywords = _merge_unique_list(item.keywords, item.faculty_keywords, item.ai_keywords)
         photo_url = request.build_absolute_uri(item.photo.url) if item.photo else ""
 
         faculty.append(
@@ -310,6 +348,19 @@ def public_search_data(request):
                 "bio": item.bio or "",
                 "researchInterests": merged_keywords[:8],
                 "aiKeywords": merged_keywords,
+                "metricsProfile": {
+                    "totalCitations": item.total_citations or 0,
+                    "articleCount": item.article_count or 0,
+                    "averageCitations": item.average_citations or 0.0,
+                },
+                "categories": {
+                    "top": _normalize_keyword_list(item.top_level_categories),
+                    "mid": _normalize_keyword_list(item.mid_level_categories),
+                    "low": _normalize_keyword_list(item.low_level_categories),
+                },
+                "themes": _normalize_keyword_list(item.themes),
+                "journals": _normalize_keyword_list(item.journals),
+                "sourceProfile": item.source_profile or {},
             }
         )
 
@@ -322,13 +373,27 @@ def public_search_data(request):
             {
                 "id": str(item.id),
                 "title": item.title or "",
+                "doi": item.doi or "",
+                "journal": item.journal or "",
                 "authors": [author.name or f"{author.first_name or ''} {author.last_name or ''}".strip() for author in item.authors.all()],
                 "year": year or 0,
                 "abstract": item.abstract or "",
                 "link": item.url or item.download_url or item.license_url or "",
+                "citations": item.tc_count or 0,
+                "publishedOnline": item.date_published_online.isoformat() if item.date_published_online else "",
+                "publishedPrint": item.date_published_print.isoformat() if item.date_published_print else "",
                 "aiKeywords": _normalize_keyword_list(item.keywords)
                 or _normalize_keyword_list(item.ai_keywords)
                 or _normalize_keyword_list(item.faculty_keywords),
+                "categories": {
+                    "top": _normalize_keyword_list(item.top_level_categories),
+                    "mid": _normalize_keyword_list(item.mid_level_categories),
+                    "low": _normalize_keyword_list(item.low_level_categories),
+                },
+                "facultyMembers": _normalize_keyword_list(item.faculty_members),
+                "facultyAffiliations": item.faculty_affiliations or {},
+                "sourceMetadata": item.source_metadata or {},
+                "engagementMetrics": item.engagement_metrics or {},
             }
         )
 
@@ -379,6 +444,116 @@ def public_search_data(request):
         }
     )
 
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def semantic_paper_search(request):
+    query = (request.query_params.get("q") or "").strip()
+    if len(query) < 2:
+        return Response({"results": [], "count": 0, "detail": "Query too short."})
+
+    try:
+        limit = int(request.query_params.get("limit", 20))
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(limit, 100))
+
+    model = (request.query_params.get("model") or "text-embedding-3-small").strip()
+
+    try:
+        query_embedding = create_query_embedding(query, model=model)
+    except RuntimeError as exc:
+        return Response(
+            {"results": [], "count": 0, "detail": str(exc)},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception as exc:
+        return Response(
+            {"results": [], "count": 0, "detail": f"Embedding failed: {exc}"},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    try:
+        papers = (
+            Paper.objects.exclude(paper_embedding=[])
+            .exclude(paper_embedding__isnull=True)
+            .prefetch_related("authors")
+        )
+    except OperationalError as exc:
+        return Response(
+            {
+                "results": [],
+                "count": 0,
+                "detail": f"Semantic search schema unavailable: {exc}. Run migrations.",
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    scored = []
+    for paper in papers:
+        embedding = paper.paper_embedding or []
+        score = cosine_similarity(query_embedding, embedding)
+        if score <= 0:
+            continue
+        score_100 = round(score * 100.0, 2)
+        scored.append((score_100, paper))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top = scored[:limit]
+
+    results = []
+    for semantic_score, paper in top:
+        year = _year_from_dates(
+            paper.date_published_online, paper.date_published_print, paper.date_published
+        )
+        results.append(
+            {
+                "id": str(paper.id),
+                "title": paper.title or "",
+                "doi": paper.doi or "",
+                "journal": paper.journal or "",
+                "authors": [
+                    author.name
+                    or f"{author.first_name or ''} {author.last_name or ''}".strip()
+                    for author in paper.authors.all()
+                ],
+                "year": year or 0,
+                "abstract": paper.abstract or "",
+                "link": paper.url or paper.download_url or paper.license_url or "",
+                "citations": paper.tc_count or 0,
+                "publishedOnline": paper.date_published_online.isoformat()
+                if paper.date_published_online
+                else "",
+                "publishedPrint": paper.date_published_print.isoformat()
+                if paper.date_published_print
+                else "",
+                "aiKeywords": _normalize_keyword_list(paper.keywords)
+                or _normalize_keyword_list(paper.ai_keywords)
+                or _normalize_keyword_list(paper.faculty_keywords),
+                "categories": {
+                    "top": _normalize_keyword_list(paper.top_level_categories),
+                    "mid": _normalize_keyword_list(paper.mid_level_categories),
+                    "low": _normalize_keyword_list(paper.low_level_categories),
+                },
+                "facultyMembers": _normalize_keyword_list(paper.faculty_members),
+                "facultyAffiliations": paper.faculty_affiliations or {},
+                "sourceMetadata": paper.source_metadata or {},
+                "engagementMetrics": paper.engagement_metrics or {},
+                "semanticScore": semantic_score,
+            }
+        )
+
+    return Response(
+        {
+            "query": query,
+            "model": model,
+            "count": len(results),
+            "results": results,
+        }
+    )
+
+
+
 def home(request):
     return HttpResponse(
         "<h1>Welcome to the Scoup Database!</h1><p>Go to <a href='/admin/'>Admin</a></p>"
@@ -400,7 +575,9 @@ class FacultyListCreateView(generics.ListCreateAPIView):
     ]
 
     def get_queryset(self):
-        return Faculty.objects.filter(is_approved=True, profile_visibility=True)
+        return Faculty.objects.filter(profile_visibility=True).filter(
+            Q(is_approved=True) | Q(user__isnull=False)
+        )
 
     serializer_class = FacultySerializer
 

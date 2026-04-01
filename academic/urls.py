@@ -11,6 +11,7 @@ from .views import (
     faculty_me_suggestions,
     faculty_suggestion_preview,
     public_search_data,
+    semantic_paper_search,
     reject_faculty_suggestion,
     PaperListCreateView,
     PaperDetailView,
@@ -27,6 +28,7 @@ from rest_framework_simplejwt.views import (
 urlpatterns = [
     path('', views.home, name='home'),
     path("public/search-data/", public_search_data, name="public-search-data"),
+    path("semantic/papers/", semantic_paper_search, name="semantic-paper-search"),
 
     path('faculty/', FacultyListCreateView.as_view(), name='faculty-list'),
     path('faculty/<int:pk>/', FacultyDetailView.as_view(), name='faculty-detail'),

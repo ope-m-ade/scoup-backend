@@ -39,6 +39,16 @@ class Faculty(models.Model):
     titles = models.JSONField(default=list, blank=True)
     categories = models.JSONField(default=list, blank=True)
     keywords = models.JSONField(default=list, blank=True)
+    top_level_categories = models.JSONField(default=list, blank=True)
+    mid_level_categories = models.JSONField(default=list, blank=True)
+    low_level_categories = models.JSONField(default=list, blank=True)
+    category_urls = models.JSONField(default=list, blank=True)
+    top_category_urls = models.JSONField(default=list, blank=True)
+    mid_category_urls = models.JSONField(default=list, blank=True)
+    low_category_urls = models.JSONField(default=list, blank=True)
+    themes = models.JSONField(default=list, blank=True)
+    journals = models.JSONField(default=list, blank=True)
+    source_profile = models.JSONField(default=dict, blank=True)
 
     def __str__(self):
         return (
@@ -65,6 +75,21 @@ class Paper(models.Model):
     url = models.URLField(blank=True, null=True)
     keywords = models.JSONField(default=list, blank=True)
     themes = models.JSONField(default=list, blank=True)
+    top_level_categories = models.JSONField(default=list, blank=True)
+    mid_level_categories = models.JSONField(default=list, blank=True)
+    low_level_categories = models.JSONField(default=list, blank=True)
+    category_urls = models.JSONField(default=list, blank=True)
+    top_category_urls = models.JSONField(default=list, blank=True)
+    mid_category_urls = models.JSONField(default=list, blank=True)
+    low_category_urls = models.JSONField(default=list, blank=True)
+    faculty_members = models.JSONField(default=list, blank=True)
+    faculty_affiliations = models.JSONField(default=dict, blank=True)
+    source_metadata = models.JSONField(default=dict, blank=True)
+    engagement_metrics = models.JSONField(default=dict, blank=True)
+    source_record = models.JSONField(default=dict, blank=True)
+    paper_embedding = models.JSONField(default=list, blank=True)
+    embedding_model = models.CharField(max_length=64, default="", blank=True)
+    embedding_updated_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.title
@@ -138,3 +163,5 @@ class FacultySuggestionDecision(models.Model):
 
     def __str__(self):
         return f"{self.reviewer_id}->{self.external_faculty_id}:{self.decision}"
+
+

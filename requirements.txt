@@ -13,3 +13,4 @@ sqlparse==0.5.3
 whitenoise==6.11.0
 dj-database-url
 pdfplumber
+openai==1.66.3
