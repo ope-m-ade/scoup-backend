@@ -4,6 +4,7 @@ from django.conf.urls.static import static
 from . import views
 from .auth import EmailOrUsernameTokenObtainPairView
 from .views import (
+    admin_me,
     approve_faculty_suggestion,
     FacultyListCreateView,
     FacultyDetailView,
@@ -33,6 +34,7 @@ urlpatterns = [
     path('faculty/', FacultyListCreateView.as_view(), name='faculty-list'),
     path('faculty/<int:pk>/', FacultyDetailView.as_view(), name='faculty-detail'),
     path('faculty/me/', faculty_me, name='faculty_me'),
+    path('admin/me/', admin_me, name='admin_me'),
     path("faculty/me/suggestions/", faculty_me_suggestions, name="faculty-me-suggestions"),
     path(
         "faculty/me/suggestions/<int:external_faculty_id>/approve/",

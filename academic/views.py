@@ -778,6 +778,27 @@ def faculty_me(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+def admin_me(request):
+    if not (request.user.is_staff or request.user.is_superuser):
+        return Response(
+            {"detail": "Admin privileges required."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    return Response(
+        {
+            "id": request.user.id,
+            "username": request.user.get_username(),
+            "email": request.user.email,
+            "is_staff": bool(request.user.is_staff),
+            "is_superuser": bool(request.user.is_superuser),
+            "is_admin": True,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def faculty_me_suggestions(request):
     faculty = _get_request_faculty(request.user, create_if_missing=True)
     if not faculty:
