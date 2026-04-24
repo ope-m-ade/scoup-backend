@@ -65,17 +65,16 @@ def _year_from_dates(*dates):
 
 
 def _normalize_paper_link(download_url, url, license_url, doi):
-    clean_doi = str(doi or "").strip()
-    if clean_doi:
-        return f"https://doi.org/{clean_doi}"
-
     for value in (download_url, url, license_url):
         clean_value = str(value or "").strip()
         if not clean_value:
             continue
         if clean_value.startswith(("http://", "https://")):
             return clean_value
-        return f"https://{clean_value}"
+
+    clean_doi = str(doi or "").strip()
+    if clean_doi:
+        return f"https://doi.org/{clean_doi}"
 
     return ""
 

@@ -5,7 +5,7 @@ from django.db import models
 
 
 class School(models.Model):
-    name = models.CharField(max_length=150, unique=True)
+    name = models.CharField(max_length=255, unique=True)
     code = models.CharField(max_length=32, unique=True, blank=True, null=True)
     is_active = models.BooleanField(default=True)
     display_order = models.PositiveIntegerField(default=0)
@@ -27,7 +27,7 @@ class Department(models.Model):
         blank=True,
         null=True,
     )
-    name = models.CharField(max_length=150)
+    name = models.CharField(max_length=255)
     code = models.CharField(max_length=32, blank=True, null=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -62,10 +62,10 @@ class Faculty(models.Model):
     faculty_id = models.CharField(max_length=100, unique=True)
     first_name = models.CharField(max_length=100, blank=True, null=True)
     last_name = models.CharField(max_length=100, blank=True, null=True)
-    title = models.CharField(max_length=150, blank=True, null=True)
-    department = models.CharField(max_length=150, blank=True, null=True)
+    title = models.CharField(max_length=255, blank=True, null=True)
+    department = models.CharField(max_length=255, blank=True, null=True)
     email = models.EmailField(unique=True, blank=True, null=True)
-    office = models.CharField(max_length=150, blank=True, null=True)
+    office = models.CharField(max_length=255, blank=True, null=True)
     room = models.CharField(max_length=100, blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
     bio = models.TextField(blank=True, null=True)
@@ -107,7 +107,7 @@ class Faculty(models.Model):
     confirmed_su_faculty = models.BooleanField(default=False, db_index=True)
     cleanup_notes = models.TextField(blank=True, null=True)
 
-    school = models.CharField(max_length=150, blank=True, null=True)
+    school = models.CharField(max_length=255, blank=True, null=True)
     school_affiliations = models.JSONField(default=list, blank=True)
     department_affiliations = models.JSONField(default=list, blank=True)
     dois = models.JSONField(default=list, blank=True)
