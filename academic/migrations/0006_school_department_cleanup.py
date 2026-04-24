@@ -13,6 +13,8 @@ STANDARD_SCHOOLS = [
     ("Clarke Honors College", "CHC"),
 ]
 
+MAX_LABEL_LENGTH = 255
+
 
 SCHOOL_ALIASES = {
     "college of health and human services": "College of Health and Human Services",
@@ -59,6 +61,13 @@ def unique(items):
         seen.add(key)
         result.append(item)
     return result
+
+
+def db_label(value):
+    label = str(value or "").strip()
+    if not label or len(label) > MAX_LABEL_LENGTH:
+        return ""
+    return label
 
 
 def canonical_school(value):
@@ -113,10 +122,11 @@ def seed_and_backfill(apps, schema_editor):
             [faculty.department] + to_list(getattr(faculty, "department_affiliations", []))
         )
         department_names = [
-            name
+            db_label(name)
             for name in department_candidates
             if normalize(name) not in school_names and not canonical_school(name)
         ]
+        department_names = [name for name in department_names if name]
 
         primary_school = school_objects[0] if school_objects else None
         department_objects = []
@@ -193,7 +203,7 @@ class Migration(migrations.Migration):
             name="School",
             fields=[
                 ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
-                ("name", models.CharField(max_length=150, unique=True)),
+                ("name", models.CharField(max_length=255, unique=True)),
                 ("code", models.CharField(blank=True, max_length=32, null=True, unique=True)),
                 ("is_active", models.BooleanField(default=True)),
                 ("display_order", models.PositiveIntegerField(default=0)),
@@ -206,7 +216,7 @@ class Migration(migrations.Migration):
             name="Department",
             fields=[
                 ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
-                ("name", models.CharField(max_length=150)),
+                ("name", models.CharField(max_length=255)),
                 ("code", models.CharField(blank=True, max_length=32, null=True)),
                 ("is_active", models.BooleanField(default=True)),
                 ("created_at", models.DateTimeField(auto_now_add=True)),
