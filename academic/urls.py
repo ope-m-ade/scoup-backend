@@ -11,6 +11,7 @@ from .views import (
     faculty_me,
     faculty_me_suggestions,
     faculty_suggestion_preview,
+    network_discovery,
     public_search_data,
     semantic_paper_search,
     reject_faculty_suggestion,
@@ -22,6 +23,12 @@ from .views import (
     PatentDetailView,
     FacultyPhotoUploadView,
     FacultyUploadCVPapers,
+    contact_team_list,
+    admin_contact_team_list,
+    admin_contact_team_detail,
+    contact_settings,
+    admin_contact_settings,
+    admin_contact_team_photo_upload,
 )
 from rest_framework_simplejwt.views import (
     TokenRefreshView,
@@ -29,6 +36,7 @@ from rest_framework_simplejwt.views import (
 urlpatterns = [
     path('', views.home, name='home'),
     path("public/search-data/", public_search_data, name="public-search-data"),
+    path("network/discovery/", network_discovery, name="network-discovery"),
     path("semantic/papers/", semantic_paper_search, name="semantic-paper-search"),
 
     path('faculty/', FacultyListCreateView.as_view(), name='faculty-list'),
@@ -62,4 +70,10 @@ urlpatterns = [
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("faculty/upload-photo/", FacultyPhotoUploadView.as_view()),
     path("faculty/upload-cv-papers/", FacultyUploadCVPapers.as_view(), name="upload-cv-papers"),
+    path("contact/team/", contact_team_list, name="contact-team-list"),
+    path("contact/settings/", contact_settings, name="contact-settings"),
+    path("admin/contact/team/", admin_contact_team_list, name="admin-contact-team-list"),
+    path("admin/contact/team/<int:pk>/", admin_contact_team_detail, name="admin-contact-team-detail"),
+    path("admin/contact/settings/", admin_contact_settings, name="admin-contact-settings"),
+    path("admin/contact/team/<int:pk>/photo/", admin_contact_team_photo_upload, name="admin-contact-team-photo"),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

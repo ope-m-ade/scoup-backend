@@ -28,3 +28,6 @@ db.sqlite3
 
 # Environment variables
 .env
+database_backups/*.sqlite3
+database_backups/*.json
+.claude/

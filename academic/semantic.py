@@ -34,19 +34,6 @@ def build_paper_semantic_text(paper) -> str:
     if themes:
         parts.append("Themes: " + ", ".join(themes))
 
-    top = _to_list(getattr(paper, "top_level_categories", None))
-    mid = _to_list(getattr(paper, "mid_level_categories", None))
-    low = _to_list(getattr(paper, "low_level_categories", None))
-    cat_parts = []
-    if top:
-        cat_parts.append("top=" + ", ".join(top))
-    if mid:
-        cat_parts.append("mid=" + ", ".join(mid))
-    if low:
-        cat_parts.append("low=" + ", ".join(low))
-    if cat_parts:
-        parts.append("Categories: " + " | ".join(cat_parts))
-
     authors = []
     try:
         authors = [

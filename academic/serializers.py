@@ -3,7 +3,7 @@
 import uuid
 from rest_framework import serializers
 
-from .models import Faculty, Paper, Patent, Project
+from .models import Faculty, Paper, Patent, Project, ContactTeamMember, ContactPageSettings
 
 
 class EmptyStringToNoneDateField(serializers.DateField):
@@ -12,17 +12,83 @@ class EmptyStringToNoneDateField(serializers.DateField):
             return None
         return super().to_internal_value(value)
 
+FACULTY_API_FIELDS = [
+    "id",
+    "user",
+    "faculty_id",
+    "first_name",
+    "last_name",
+    "name",
+    "title",
+    "department",
+    "email",
+    "office",
+    "room",
+    "phone",
+    "bio",
+    "faculty_keywords",
+    "ai_keywords",
+    "profile_visibility",
+    "is_approved",
+    "photo",
+    "created_at",
+    "updated_at",
+    "total_citations",
+    "article_count",
+    "average_citations",
+    "primary_school",
+    "primary_department",
+    "schools",
+    "departments",
+    "review_status",
+    "confirmed_su_faculty",
+    "cleanup_notes",
+    "school",
+    "school_affiliations",
+    "department_affiliations",
+    "dois",
+    "titles",
+    "keywords",
+    "themes",
+    "journals",
+]
+
+
 class FacultySerializer(serializers.ModelSerializer):
     class Meta:
         model = Faculty
-        fields = "__all__"
+        fields = FACULTY_API_FIELDS
         read_only_fields = ["user"]
+
 
 class FacultyProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = Faculty
-        fields = "__all__"
+        fields = FACULTY_API_FIELDS
         read_only_fields = ["user", "faculty_id", "created_at", "updated_at"]
+
+PAPER_API_FIELDS = [
+    "id",
+    "doi",
+    "title",
+    "abstract",
+    "journal",
+    "date_published",
+    "download_url",
+    "license_url",
+    "ai_keywords",
+    "faculty_keywords",
+    "authors",
+    "tc_count",
+    "date_published_online",
+    "date_published_print",
+    "url",
+    "keywords",
+    "themes",
+    "year",
+    "status",
+]
+
 
 class PaperSerializer(serializers.ModelSerializer):
     doi = serializers.CharField(required=False, allow_blank=True)
@@ -32,7 +98,7 @@ class PaperSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Paper
-        fields = "__all__"
+        fields = PAPER_API_FIELDS
         read_only_fields = ("authors",)
 
     def create(self, validated_data):
@@ -138,3 +204,24 @@ class PatentSerializer(serializers.ModelSerializer):
         validated_data.pop("assignee", None)
         validated_data.pop("keywords", None)
         return super().update(instance, validated_data)
+
+class ContactTeamMemberSerializer(serializers.ModelSerializer):
+    photo = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ContactTeamMember
+        fields = "__all__"
+
+    def get_photo(self, obj):
+        if not obj.photo:
+            return None
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(obj.photo.url)
+        return obj.photo.url
+
+
+class ContactPageSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ContactPageSettings
+        fields = "__all__"

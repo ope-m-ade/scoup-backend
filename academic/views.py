@@ -16,6 +16,14 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .affiliations import (
+    extract_departments_from_faculty_affiliations,
+    extract_salisbury_departments,
+    extract_salisbury_schools,
+    extract_schools_from_faculty_affiliations,
+    sanitize_department_label,
+    sanitize_school_label,
+)
 from .models import (
     Faculty,
     FacultySuggestionDecision,
@@ -23,6 +31,8 @@ from .models import (
     PaperAuthorship,
     Patent,
     Project,
+    ContactTeamMember,
+    ContactPageSettings,
 )
 from .serializers import (
     FacultyProfileSerializer,
@@ -30,6 +40,9 @@ from .serializers import (
     PaperSerializer,
     PatentSerializer,
     ProjectSerializer,
+    ContactTeamMemberSerializer,
+    ContactPageSettingsSerializer,
+
 )
 from .semantic import cosine_similarity, create_query_embedding
 
@@ -49,6 +62,24 @@ def _year_from_dates(*dates):
         if dt:
             return dt.year
     return None
+
+
+def _normalize_paper_link(download_url, url, license_url, doi):
+    clean_doi = str(doi or "").strip()
+    if clean_doi:
+        return f"https://doi.org/{clean_doi}"
+
+    for value in (download_url, url, license_url):
+        clean_value = str(value or "").strip()
+        if not clean_value:
+            continue
+        if clean_value.startswith(("http://", "https://")):
+            return clean_value
+        return f"https://{clean_value}"
+
+    return ""
+
+
 
 
 def _generate_signup_faculty_id():
@@ -83,6 +114,132 @@ def _merge_unique_list(*values):
             seen.add(key)
             ordered.append(item)
     return ordered
+
+
+def _legacy_school_names(faculty):
+    sanitized = []
+    if getattr(faculty, "school", None):
+        clean = sanitize_school_label(faculty.school)
+        if clean:
+            sanitized.append(clean)
+    return _merge_unique_list(
+        sanitized,
+        extract_salisbury_schools(
+            _merge_unique_list(
+                getattr(faculty, "school_affiliations", []),
+                getattr(faculty, "department_affiliations", []),
+                [faculty.school] if getattr(faculty, "school", None) else [],
+                [faculty.department] if getattr(faculty, "department", None) else [],
+            )
+        ),
+    )
+
+
+def _legacy_department_names(faculty):
+    sanitized = []
+    if getattr(faculty, "department", None):
+        clean = sanitize_department_label(faculty.department)
+        if clean:
+            sanitized.append(clean)
+    return _merge_unique_list(
+        sanitized,
+        extract_salisbury_departments(
+            _merge_unique_list(
+                getattr(faculty, "department_affiliations", []),
+                getattr(faculty, "school_affiliations", []),
+                [faculty.department] if getattr(faculty, "department", None) else [],
+                [faculty.school] if getattr(faculty, "school", None) else [],
+            )
+        ),
+    )
+
+
+def _has_salisbury_department(faculty):
+    return bool(_faculty_department_names(faculty) or _faculty_school_names(faculty))
+
+
+def _faculty_school_names(faculty):
+    names = []
+    if getattr(faculty, "primary_school_id", None):
+        names.append(faculty.primary_school.name)
+    names.extend([school.name for school in faculty.schools.all()])
+    return _merge_unique_list(names, _legacy_school_names(faculty))
+
+
+def _faculty_department_names(faculty):
+    names = []
+    if getattr(faculty, "primary_department_id", None):
+        names.append(faculty.primary_department.name)
+    names.extend([department.name for department in faculty.departments.all()])
+    return _merge_unique_list(names, _legacy_department_names(faculty))
+
+
+def _is_confirmed_su_faculty(faculty):
+    if getattr(faculty, "confirmed_su_faculty", False):
+        return True
+    if getattr(faculty, "review_status", "") == "confirmed_su":
+        return True
+    if faculty.user_id and faculty.is_approved and faculty.profile_visibility:
+        return True
+    email = (faculty.email or "").strip().lower()
+    if email.endswith("@salisbury.edu") or email.endswith("@gulls.salisbury.edu"):
+        return True
+    return bool(_faculty_department_names(faculty) or _faculty_school_names(faculty))
+
+
+def _score_network_item(
+    candidate_keywords,
+    candidate_departments,
+    candidate_schools,
+    my_keywords,
+    my_departments,
+    my_schools,
+    richness=0,
+):
+    candidate_keyword_set = {item.lower() for item in _normalize_keyword_list(candidate_keywords)}
+    my_keyword_set = {item.lower() for item in _normalize_keyword_list(my_keywords)}
+    shared_keywords = sorted(candidate_keyword_set.intersection(my_keyword_set))
+
+    department_match = bool(
+        {item.lower() for item in _normalize_keyword_list(candidate_departments)}
+        .intersection({item.lower() for item in _normalize_keyword_list(my_departments)})
+    )
+    school_match = bool(
+        {item.lower() for item in _normalize_keyword_list(candidate_schools)}
+        .intersection({item.lower() for item in _normalize_keyword_list(my_schools)})
+    )
+
+    score = 38
+    if not my_keyword_set:
+        score = 45
+    score += min(36, len(shared_keywords) * 12)
+    if department_match:
+        score += 12
+    if school_match:
+        score += 8
+    score += min(10, richness * 2)
+    return min(96, score), shared_keywords[:6], department_match, school_match
+
+
+def _network_reason(shared_keywords, department_match, school_match, fallback):
+    if shared_keywords and department_match:
+        return f"Shared expertise in {', '.join(shared_keywords[:3])} with department overlap."
+    if shared_keywords and school_match:
+        return f"Shared expertise in {', '.join(shared_keywords[:3])} within a related school."
+    if shared_keywords:
+        return f"Shared expertise in {', '.join(shared_keywords[:3])}."
+    if department_match:
+        return "Potential fit based on department alignment."
+    if school_match:
+        return "Potential fit based on school alignment."
+    return fallback
+
+
+def _matches_query(values, query):
+    if not query:
+        return True
+    needle = query.lower()
+    return any(needle in str(value or "").lower() for value in values)
 
 
 def _first_non_empty(*values):
@@ -127,28 +284,12 @@ def _absorb_external_faculty(internal, external):
     internal.department_affiliations = _merge_unique_list(
         internal.department_affiliations, external.department_affiliations
     )
+    internal.school = _first_non_empty(internal.school, external.school)
+    internal.school_affiliations = _merge_unique_list(
+        internal.school_affiliations, external.school_affiliations
+    )
     internal.dois = _merge_unique_list(internal.dois, external.dois)
     internal.titles = _merge_unique_list(internal.titles, external.titles)
-    internal.categories = _merge_unique_list(internal.categories, external.categories)
-    internal.top_level_categories = _merge_unique_list(
-        internal.top_level_categories, external.top_level_categories
-    )
-    internal.mid_level_categories = _merge_unique_list(
-        internal.mid_level_categories, external.mid_level_categories
-    )
-    internal.low_level_categories = _merge_unique_list(
-        internal.low_level_categories, external.low_level_categories
-    )
-    internal.category_urls = _merge_unique_list(internal.category_urls, external.category_urls)
-    internal.top_category_urls = _merge_unique_list(
-        internal.top_category_urls, external.top_category_urls
-    )
-    internal.mid_category_urls = _merge_unique_list(
-        internal.mid_category_urls, external.mid_category_urls
-    )
-    internal.low_category_urls = _merge_unique_list(
-        internal.low_category_urls, external.low_category_urls
-    )
     internal.themes = _merge_unique_list(internal.themes, external.themes)
     internal.journals = _merge_unique_list(internal.journals, external.journals)
     internal.keywords = _merge_unique_list(internal.keywords, external.keywords)
@@ -159,12 +300,6 @@ def _absorb_external_faculty(internal, external):
         _merge_unique_list(internal.ai_keywords, external.ai_keywords)
     )
 
-    merged_source_profile = {}
-    if isinstance(external.source_profile, dict):
-        merged_source_profile.update(external.source_profile)
-    if isinstance(internal.source_profile, dict):
-        merged_source_profile.update(internal.source_profile)
-    internal.source_profile = merged_source_profile
     internal.total_citations = max(internal.total_citations or 0, external.total_citations or 0)
     internal.article_count = max(internal.article_count or 0, external.article_count or 0)
     internal.average_citations = max(
@@ -325,6 +460,9 @@ def public_search_data(request):
 
     faculty = []
     for item in faculty_qs:
+        if not item.user_id and not _has_salisbury_department(item):
+            continue
+
         user_first_name = (item.user.first_name if item.user else "") or ""
         user_last_name = (item.user.last_name if item.user else "") or ""
         user_username = (item.user.username if item.user else "") or ""
@@ -336,12 +474,18 @@ def public_search_data(request):
         merged_keywords = _merge_unique_list(item.keywords, item.faculty_keywords, item.ai_keywords)
         photo_url = request.build_absolute_uri(item.photo.url) if item.photo else ""
 
+        departments = _faculty_department_names(item)
+        schools = _faculty_school_names(item)
+
         faculty.append(
             {
                 "id": str(item.id),
                 "name": full_name,
                 "title": item.title or "",
-                "department": item.department or "",
+                "department": departments[0] if departments else "",
+                "departmentAffiliations": departments,
+                "school": schools[0] if schools else "",
+                "schoolAffiliations": schools,
                 "email": item.email or "",
                 "phone": item.phone or "",
                 "photo": photo_url,
@@ -353,14 +497,8 @@ def public_search_data(request):
                     "articleCount": item.article_count or 0,
                     "averageCitations": item.average_citations or 0.0,
                 },
-                "categories": {
-                    "top": _normalize_keyword_list(item.top_level_categories),
-                    "mid": _normalize_keyword_list(item.mid_level_categories),
-                    "low": _normalize_keyword_list(item.low_level_categories),
-                },
                 "themes": _normalize_keyword_list(item.themes),
                 "journals": _normalize_keyword_list(item.journals),
-                "sourceProfile": item.source_profile or {},
             }
         )
 
@@ -369,31 +507,35 @@ def public_search_data(request):
         year = _year_from_dates(
             item.date_published_online, item.date_published_print, item.date_published
         )
+        authors = list(item.authors.all())
+        paper_departments = _merge_unique_list(
+            extract_departments_from_faculty_affiliations(item.faculty_affiliations),
+            *[_faculty_department_names(author) for author in authors],
+        )
+        paper_schools = _merge_unique_list(
+            extract_schools_from_faculty_affiliations(item.faculty_affiliations),
+            *[_faculty_school_names(author) for author in authors],
+        )
         papers.append(
             {
                 "id": str(item.id),
                 "title": item.title or "",
                 "doi": item.doi or "",
                 "journal": item.journal or "",
-                "authors": [author.name or f"{author.first_name or ''} {author.last_name or ''}".strip() for author in item.authors.all()],
+                "authors": [author.name or f"{author.first_name or ''} {author.last_name or ''}".strip() for author in authors],
                 "year": year or 0,
                 "abstract": item.abstract or "",
-                "link": item.url or item.download_url or item.license_url or "",
+                "link": _normalize_paper_link(item.download_url, item.url, item.license_url, item.doi),
                 "citations": item.tc_count or 0,
                 "publishedOnline": item.date_published_online.isoformat() if item.date_published_online else "",
                 "publishedPrint": item.date_published_print.isoformat() if item.date_published_print else "",
                 "aiKeywords": _normalize_keyword_list(item.keywords)
                 or _normalize_keyword_list(item.ai_keywords)
                 or _normalize_keyword_list(item.faculty_keywords),
-                "categories": {
-                    "top": _normalize_keyword_list(item.top_level_categories),
-                    "mid": _normalize_keyword_list(item.mid_level_categories),
-                    "low": _normalize_keyword_list(item.low_level_categories),
-                },
                 "facultyMembers": _normalize_keyword_list(item.faculty_members),
                 "facultyAffiliations": item.faculty_affiliations or {},
-                "sourceMetadata": item.source_metadata or {},
-                "engagementMetrics": item.engagement_metrics or {},
+                "departmentAffiliations": paper_departments,
+                "schoolAffiliations": paper_schools,
             }
         )
 
@@ -413,6 +555,12 @@ def public_search_data(request):
                 "startDate": item.start_date.isoformat() if item.start_date else "",
                 "endDate": item.end_date.isoformat() if item.end_date else "",
                 "aiKeywords": _normalize_keyword_list(item.keywords),
+                "departmentAffiliations": _merge_unique_list(
+                    *[_faculty_department_names(member) for member in item.faculty.all()]
+                ),
+                "schoolAffiliations": _merge_unique_list(
+                    *[_faculty_school_names(member) for member in item.faculty.all()]
+                ),
             }
         )
 
@@ -432,6 +580,12 @@ def public_search_data(request):
                 "description": item.abstract or "",
                 "link": item.link or "",
                 "aiKeywords": _normalize_keyword_list(item.aiKeywords),
+                "departmentAffiliations": _merge_unique_list(
+                    *[_faculty_department_names(member) for member in item.faculty.all()]
+                ),
+                "schoolAffiliations": _merge_unique_list(
+                    *[_faculty_school_names(member) for member in item.faculty.all()]
+                ),
             }
         )
 
@@ -441,6 +595,276 @@ def public_search_data(request):
             "papersData": papers,
             "patentsData": patents,
             "projectsData": projects,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def network_discovery(request):
+    faculty = _get_request_faculty(request.user)
+    if not faculty:
+        raise NotFound("Faculty profile not found for this user.")
+
+    query = (request.query_params.get("q") or "").strip()
+    try:
+        limit = int(request.query_params.get("limit") or (25 if query else 5))
+    except (TypeError, ValueError):
+        limit = 25 if query else 5
+    limit = max(1, min(limit, 50))
+
+    my_keywords = list(_keywords_for_matching(faculty))
+    my_departments = _faculty_department_names(faculty)
+    my_schools = _faculty_school_names(faculty)
+
+    colleagues = []
+    faculty_qs = (
+        Faculty.objects.filter(profile_visibility=True)
+        .filter(Q(is_approved=True) | Q(user__isnull=False) | Q(confirmed_su_faculty=True))
+        .exclude(id=faculty.id)
+        .prefetch_related("schools", "departments", "papers")
+        .select_related("primary_school", "primary_department", "user")
+    )
+    for item in faculty_qs:
+        if not _is_confirmed_su_faculty(item):
+            continue
+
+        name = _full_name(
+            item.first_name,
+            item.last_name,
+            (item.name or "").strip() or item.faculty_id,
+        )
+        departments = _faculty_department_names(item)
+        schools = _faculty_school_names(item)
+        keywords = _merge_unique_list(item.keywords, item.faculty_keywords, item.ai_keywords, item.themes)
+        if not _matches_query(
+            [name, item.email, item.title, item.bio, *departments, *schools, *keywords],
+            query,
+        ):
+            continue
+
+        score, shared, department_match, school_match = _score_network_item(
+            keywords,
+            departments,
+            schools,
+            my_keywords,
+            my_departments,
+            my_schools,
+            richness=sum(
+                bool(value)
+                for value in [
+                    item.email,
+                    item.title,
+                    item.bio,
+                    departments,
+                    schools,
+                    keywords,
+                    item.article_count,
+                ]
+            ),
+        )
+        colleagues.append(
+            {
+                "id": str(item.id),
+                "name": name,
+                "title": item.title or "",
+                "department": departments[0] if departments else "",
+                "departments": departments,
+                "school": schools[0] if schools else "",
+                "schools": schools,
+                "email": item.email or "",
+                "phone": item.phone or "",
+                "bio": item.bio or "",
+                "photo": request.build_absolute_uri(item.photo.url) if item.photo else "",
+                "keywords": keywords,
+                "sharedKeywords": shared,
+                "matchScore": score,
+                "matchReason": _network_reason(
+                    shared,
+                    department_match,
+                    school_match,
+                    "Potential collaboration fit based on available SU profile data.",
+                ),
+                "articleCount": item.article_count or item.papers.count(),
+                "totalCitations": item.total_citations or 0,
+            }
+        )
+
+    papers = []
+    papers_qs = (
+        Paper.objects.defer("paper_embedding", "embedding_model", "embedding_updated_at")
+        .prefetch_related("authors", "authors__schools", "authors__departments")
+        .order_by("-id")
+    )
+    for item in papers_qs:
+        authors = list(item.authors.all())
+        if not any(_is_confirmed_su_faculty(author) for author in authors):
+            continue
+        raw_affiliation_departments = extract_departments_from_faculty_affiliations(
+            item.faculty_affiliations
+        )
+        raw_affiliation_schools = extract_schools_from_faculty_affiliations(
+            item.faculty_affiliations
+        )
+        departments = _merge_unique_list(
+            raw_affiliation_departments,
+            *[_faculty_department_names(author) for author in authors],
+        )
+        schools = _merge_unique_list(
+            raw_affiliation_schools,
+            *[_faculty_school_names(author) for author in authors],
+        )
+        keywords = _merge_unique_list(item.keywords, item.ai_keywords, item.faculty_keywords, item.themes)
+        author_names = [
+            author.name
+            or _full_name(author.first_name, author.last_name, author.faculty_id)
+            for author in authors
+        ]
+        if not _matches_query([item.title, item.journal, item.abstract, *author_names, *departments, *schools, *keywords], query):
+            continue
+        score, shared, department_match, school_match = _score_network_item(
+            keywords,
+            departments,
+            schools,
+            my_keywords,
+            my_departments,
+            my_schools,
+            richness=sum(bool(value) for value in [item.journal, item.abstract, item.tc_count, keywords]),
+        )
+        papers.append(
+            {
+                "id": str(item.id),
+                "title": item.title or "",
+                "authors": author_names,
+                "journal": item.journal or "",
+                "year": _year_from_dates(item.date_published_online, item.date_published_print, item.date_published) or 0,
+                "abstract": item.abstract or "",
+                "link": _normalize_paper_link(item.download_url, item.url, item.license_url, item.doi),
+                "citations": item.tc_count or 0,
+                "keywords": keywords,
+                "departments": departments,
+                "schools": schools,
+                "sharedKeywords": shared,
+                "relevanceScore": score,
+                "relevanceReason": _network_reason(
+                    shared,
+                    department_match,
+                    school_match,
+                    "Potential reading or collaboration lead based on SU publication data.",
+                ),
+            }
+        )
+
+    patents = []
+    for item in Patent.objects.all().prefetch_related("faculty", "faculty__schools", "faculty__departments").order_by("-id"):
+        members = list(item.faculty.all())
+        if not any(_is_confirmed_su_faculty(member) for member in members):
+            continue
+        departments = _merge_unique_list(*[_faculty_department_names(member) for member in members])
+        schools = _merge_unique_list(*[_faculty_school_names(member) for member in members])
+        keywords = _normalize_keyword_list(item.aiKeywords)
+        inventor_names = [
+            member.name
+            or _full_name(member.first_name, member.last_name, member.faculty_id)
+            for member in members
+        ]
+        if not _matches_query([item.title, item.patent_number, item.abstract, *inventor_names, *departments, *schools, *keywords], query):
+            continue
+        score, shared, department_match, school_match = _score_network_item(
+            keywords,
+            departments,
+            schools,
+            my_keywords,
+            my_departments,
+            my_schools,
+            richness=sum(bool(value) for value in [item.patent_number, item.abstract, item.issue_date, keywords]),
+        )
+        patents.append(
+            {
+                "id": str(item.id),
+                "title": item.title or "",
+                "inventors": inventor_names,
+                "patentNumber": item.patent_number or "",
+                "year": item.issue_date.year if item.issue_date else 0,
+                "description": item.abstract or "",
+                "link": item.link or "",
+                "keywords": keywords,
+                "departments": departments,
+                "schools": schools,
+                "sharedKeywords": shared,
+                "relevanceScore": score,
+                "relevanceReason": _network_reason(
+                    shared,
+                    department_match,
+                    school_match,
+                    "Potential innovation lead based on SU patent data.",
+                ),
+            }
+        )
+
+    projects = []
+    for item in Project.objects.all().prefetch_related("faculty", "faculty__schools", "faculty__departments").order_by("-id"):
+        members = list(item.faculty.all())
+        if not any(_is_confirmed_su_faculty(member) for member in members):
+            continue
+        departments = _merge_unique_list(*[_faculty_department_names(member) for member in members])
+        schools = _merge_unique_list(*[_faculty_school_names(member) for member in members])
+        keywords = _normalize_keyword_list(item.keywords)
+        lead_names = [
+            member.name
+            or _full_name(member.first_name, member.last_name, member.faculty_id)
+            for member in members
+        ]
+        if not _matches_query([item.title, item.description, item.status, *lead_names, *departments, *schools, *keywords], query):
+            continue
+        score, shared, department_match, school_match = _score_network_item(
+            keywords,
+            departments,
+            schools,
+            my_keywords,
+            my_departments,
+            my_schools,
+            richness=sum(bool(value) for value in [item.description, item.status, item.start_date, keywords]),
+        )
+        projects.append(
+            {
+                "id": str(item.id),
+                "title": item.title or "",
+                "leadFaculty": lead_names,
+                "status": item.status or "Active",
+                "description": item.description or "",
+                "startDate": item.start_date.isoformat() if item.start_date else "",
+                "endDate": item.end_date.isoformat() if item.end_date else "",
+                "keywords": keywords,
+                "department": departments[0] if departments else "",
+                "departments": departments,
+                "school": schools[0] if schools else "",
+                "schools": schools,
+                "sharedKeywords": shared,
+                "relevanceScore": score,
+                "relevanceReason": _network_reason(
+                    shared,
+                    department_match,
+                    school_match,
+                    "Potential interdisciplinary project fit.",
+                ),
+            }
+        )
+
+    colleagues.sort(key=lambda row: (row["matchScore"], row["articleCount"]), reverse=True)
+    papers.sort(key=lambda row: (row["relevanceScore"], row["year"]), reverse=True)
+    patents.sort(key=lambda row: (row["relevanceScore"], row["year"]), reverse=True)
+    projects.sort(key=lambda row: row["relevanceScore"], reverse=True)
+
+    return Response(
+        {
+            "query": query,
+            "limit": limit,
+            "profileKeywords": my_keywords,
+            "colleagues": colleagues[:limit],
+            "papers": papers[:limit],
+            "patents": patents[:limit],
+            "projects": projects[:limit],
         }
     )
 
@@ -519,7 +943,7 @@ def semantic_paper_search(request):
                 ],
                 "year": year or 0,
                 "abstract": paper.abstract or "",
-                "link": paper.url or paper.download_url or paper.license_url or "",
+                "link": _normalize_paper_link(paper.download_url, paper.url, paper.license_url, paper.doi),
                 "citations": paper.tc_count or 0,
                 "publishedOnline": paper.date_published_online.isoformat()
                 if paper.date_published_online
@@ -530,14 +954,11 @@ def semantic_paper_search(request):
                 "aiKeywords": _normalize_keyword_list(paper.keywords)
                 or _normalize_keyword_list(paper.ai_keywords)
                 or _normalize_keyword_list(paper.faculty_keywords),
-                "categories": {
-                    "top": _normalize_keyword_list(paper.top_level_categories),
-                    "mid": _normalize_keyword_list(paper.mid_level_categories),
-                    "low": _normalize_keyword_list(paper.low_level_categories),
-                },
                 "facultyMembers": _normalize_keyword_list(paper.faculty_members),
                 "facultyAffiliations": paper.faculty_affiliations or {},
-                "sourceMetadata": paper.source_metadata or {},
+                "departmentAffiliations": _merge_unique_list(
+                    *list((paper.faculty_affiliations or {}).values())
+                ),
                 "engagementMetrics": paper.engagement_metrics or {},
                 "semanticScore": semantic_score,
             }
@@ -1065,3 +1486,82 @@ class FacultyUploadCVPapers(APIView):
             "papers_found": len(created),
             "papers": created
         })
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def contact_team_list(request):
+    members = ContactTeamMember.objects.filter(is_visible=True)
+    serializer = ContactTeamMemberSerializer(members, many=True, context={"request": request})
+    return Response(serializer.data)
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def admin_contact_team_list(request):
+    if not request.user.is_staff:
+        return Response({"detail": "Forbidden."}, status=403)
+    if request.method == "GET":
+        members = ContactTeamMember.objects.all()
+        serializer = ContactTeamMemberSerializer(members, many=True, context={"request": request})
+        return Response(serializer.data)
+    serializer = ContactTeamMemberSerializer(data=request.data, context={"request": request})
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data, status=201)
+    return Response(serializer.errors, status=400)
+
+
+@api_view(["PUT", "PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
+def admin_contact_team_detail(request, pk):
+    if not request.user.is_staff:
+        return Response({"detail": "Forbidden."}, status=403)
+    try:
+        member = ContactTeamMember.objects.get(pk=pk)
+    except ContactTeamMember.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    if request.method == "DELETE":
+        member.delete()
+        return Response(status=204)
+    serializer = ContactTeamMemberSerializer(member, data=request.data, partial=request.method == "PATCH", context={"request": request})
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=400)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def contact_settings(request):
+    obj, _ = ContactPageSettings.objects.get_or_create(pk=1)
+    serializer = ContactPageSettingsSerializer(obj)
+    return Response(serializer.data)
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def admin_contact_settings(request):
+    if not request.user.is_staff:
+        return Response({"detail": "Forbidden."}, status=403)
+    obj, _ = ContactPageSettings.objects.get_or_create(pk=1)
+    serializer = ContactPageSettingsSerializer(obj, data=request.data, partial=True)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=400)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def admin_contact_team_photo_upload(request, pk):
+    if not request.user.is_staff:
+        return Response({"detail": "Forbidden."}, status=403)
+    try:
+        member = ContactTeamMember.objects.get(pk=pk)
+    except ContactTeamMember.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    if "photo" not in request.FILES:
+        return Response({"detail": "No photo provided."}, status=400)
+    member.photo = request.FILES["photo"]
+    member.save()
+    serializer = ContactTeamMemberSerializer(member, context={"request": request})
+    return Response(serializer.data)

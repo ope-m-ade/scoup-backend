@@ -1,9 +1,57 @@
 
-from django.db import models
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
+from django.db import models
+
+
+class School(models.Model):
+    name = models.CharField(max_length=150, unique=True)
+    code = models.CharField(max_length=32, unique=True, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["display_order", "name"]
+
+    def __str__(self):
+        return self.name
+
+
+class Department(models.Model):
+    school = models.ForeignKey(
+        School,
+        on_delete=models.PROTECT,
+        related_name="departments",
+        blank=True,
+        null=True,
+    )
+    name = models.CharField(max_length=150)
+    code = models.CharField(max_length=32, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["school__display_order", "school__name", "name"]
+        unique_together = ("school", "name")
+
+    def __str__(self):
+        if self.school:
+            return f"{self.name} ({self.school.name})"
+        return self.name
 
 
 class Faculty(models.Model):
+    REVIEW_STATUS_CHOICES = [
+        ("pending", "Pending Review"),
+        ("confirmed_su", "Confirmed SU Faculty"),
+        ("external", "External Collaborator"),
+        ("archived", "Archived"),
+        ("rejected", "Rejected"),
+    ]
+
     user = models.OneToOneField(
         User,
         on_delete=models.CASCADE,
@@ -34,21 +82,39 @@ class Faculty(models.Model):
     article_count = models.IntegerField(default=0)
     average_citations = models.FloatField(default=0.0)
 
+    primary_school = models.ForeignKey(
+        School,
+        on_delete=models.SET_NULL,
+        related_name="primary_faculty",
+        blank=True,
+        null=True,
+    )
+    primary_department = models.ForeignKey(
+        Department,
+        on_delete=models.SET_NULL,
+        related_name="primary_faculty",
+        blank=True,
+        null=True,
+    )
+    schools = models.ManyToManyField(School, related_name="faculty", blank=True)
+    departments = models.ManyToManyField(Department, related_name="faculty", blank=True)
+    review_status = models.CharField(
+        max_length=24,
+        choices=REVIEW_STATUS_CHOICES,
+        default="pending",
+        db_index=True,
+    )
+    confirmed_su_faculty = models.BooleanField(default=False, db_index=True)
+    cleanup_notes = models.TextField(blank=True, null=True)
+
+    school = models.CharField(max_length=150, blank=True, null=True)
+    school_affiliations = models.JSONField(default=list, blank=True)
     department_affiliations = models.JSONField(default=list, blank=True)
     dois = models.JSONField(default=list, blank=True)
     titles = models.JSONField(default=list, blank=True)
-    categories = models.JSONField(default=list, blank=True)
     keywords = models.JSONField(default=list, blank=True)
-    top_level_categories = models.JSONField(default=list, blank=True)
-    mid_level_categories = models.JSONField(default=list, blank=True)
-    low_level_categories = models.JSONField(default=list, blank=True)
-    category_urls = models.JSONField(default=list, blank=True)
-    top_category_urls = models.JSONField(default=list, blank=True)
-    mid_category_urls = models.JSONField(default=list, blank=True)
-    low_category_urls = models.JSONField(default=list, blank=True)
     themes = models.JSONField(default=list, blank=True)
     journals = models.JSONField(default=list, blank=True)
-    source_profile = models.JSONField(default=dict, blank=True)
 
     def __str__(self):
         return (
@@ -56,6 +122,22 @@ class Faculty(models.Model):
             or f"{(self.first_name or '').strip()} {(self.last_name or '').strip()}".strip()
             or self.faculty_id
         )
+
+    def clean(self):
+        super().clean()
+        if (
+            self.primary_department_id
+            and self.primary_school_id
+            and self.primary_department.school_id
+            and self.primary_department.school_id != self.primary_school_id
+        ):
+            raise ValidationError(
+                {
+                    "primary_department": (
+                        "Primary department must belong to the selected primary school."
+                    )
+                }
+            )
 
 
 class Paper(models.Model):
@@ -75,18 +157,9 @@ class Paper(models.Model):
     url = models.URLField(blank=True, null=True)
     keywords = models.JSONField(default=list, blank=True)
     themes = models.JSONField(default=list, blank=True)
-    top_level_categories = models.JSONField(default=list, blank=True)
-    mid_level_categories = models.JSONField(default=list, blank=True)
-    low_level_categories = models.JSONField(default=list, blank=True)
-    category_urls = models.JSONField(default=list, blank=True)
-    top_category_urls = models.JSONField(default=list, blank=True)
-    mid_category_urls = models.JSONField(default=list, blank=True)
-    low_category_urls = models.JSONField(default=list, blank=True)
     faculty_members = models.JSONField(default=list, blank=True)
     faculty_affiliations = models.JSONField(default=dict, blank=True)
-    source_metadata = models.JSONField(default=dict, blank=True)
     engagement_metrics = models.JSONField(default=dict, blank=True)
-    source_record = models.JSONField(default=dict, blank=True)
     paper_embedding = models.JSONField(default=list, blank=True)
     embedding_model = models.CharField(max_length=64, default="", blank=True)
     embedding_updated_at = models.DateTimeField(null=True, blank=True)
@@ -164,4 +237,33 @@ class FacultySuggestionDecision(models.Model):
     def __str__(self):
         return f"{self.reviewer_id}->{self.external_faculty_id}:{self.decision}"
 
+class ContactTeamMember(models.Model):
+    name = models.CharField(max_length=200)
+    role = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    email = models.EmailField(blank=True)
+    linkedin_url = models.URLField(blank=True)
+    photo = models.ImageField(upload_to="contact_photos/", blank=True, null=True)
+    order = models.PositiveIntegerField(default=0)
+    is_visible = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        ordering = ["order", "name"]
+        
+    def __str__(self):
+        return self.name
+    
+class ContactPageSettings(models.Model):
+    general_email = models.EmailField(blank=True)
+    support_email = models.EmailField(blank=True)
+    github_url = models.URLField(blank=True)
+    linkedin_url = models.URLField(blank=True)
+    address_line_1 = models.CharField(max_length=200, blank=True)
+    address_line_2 = models.CharField(max_length=200, blank=True)
+    address_line_3 = models.CharField(max_length=200, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return "Contact Page Settings"
