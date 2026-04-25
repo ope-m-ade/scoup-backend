@@ -445,8 +445,8 @@ def public_search_data(request):
     faculty_qs = (
         Faculty.objects.filter(profile_visibility=True)
         .filter(Q(is_approved=True) | Q(user__isnull=False))
-        .prefetch_related("projects", "patents")
-        .select_related("user")
+        .prefetch_related("projects", "patents", "departments", "schools")
+        .select_related("user", "primary_department", "primary_school")
         .order_by("last_name", "first_name")
     )
     papers_qs = (
