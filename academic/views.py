@@ -885,16 +885,43 @@ def semantic_paper_search(request):
 
     try:
         query_embedding = create_query_embedding(query, model=model)
-    except RuntimeError as exc:
-        return Response(
-            {"results": [], "count": 0, "detail": str(exc)},
-            status=status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-    except Exception as exc:
-        return Response(
-            {"results": [], "count": 0, "detail": f"Embedding failed: {exc}"},
-            status=status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
+    except (RuntimeError, Exception):
+        query_embedding = None
+
+    if query_embedding is None:
+        # Keyword fallback when OpenAI is unavailable
+        words = [w.lower() for w in query.split() if len(w) > 1]
+        qs = Paper.objects.prefetch_related("authors")
+        for word in words:
+            qs = qs.filter(
+                Q(title__icontains=word)
+                | Q(abstract__icontains=word)
+                | Q(journal__icontains=word)
+            )
+        results = []
+        for paper in qs[:limit]:
+            year = _year_from_dates(
+                paper.date_published_online, paper.date_published_print, paper.date_published
+            )
+            results.append({
+                "id": str(paper.id),
+                "title": paper.title or "",
+                "doi": paper.doi or "",
+                "journal": paper.journal or "",
+                "authors": [
+                    author.name or f"{author.first_name or ''} {author.last_name or ''}".strip()
+                    for author in paper.authors.all()
+                ],
+                "year": year or 0,
+                "abstract": paper.abstract or "",
+                "link": paper.download_url or paper.url or paper.license_url or "",
+                "citations": paper.tc_count or 0,
+                "aiKeywords": _normalize_keyword_list(paper.keywords)
+                    or _normalize_keyword_list(paper.ai_keywords)
+                    or _normalize_keyword_list(paper.faculty_keywords),
+                "semanticScore": 0,
+            })
+        return Response({"query": query, "model": "keyword", "count": len(results), "results": results})
 
     try:
         papers = (
