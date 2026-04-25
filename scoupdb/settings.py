@@ -102,13 +102,17 @@ FRONTEND_ORIGINS = [
     "https://scoup-frontend-gfuswkjyy-ope-m-ades-projects.vercel.app",
     "https://scoup-frontend-2-0.vercel.app",
     "https://scoup-frontend-2-0-2poqqdhc7-ope-m-ades-projects.vercel.app",
+    "https://scoup-frontend-2-0-3v4op2cv2-ope-m-ades-projects.vercel.app",
 ]
 
 CORS_ALLOWED_ORIGINS = FRONTEND_ORIGINS
 CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://scoup-frontend-2-0-[a-z0-9-]+-ope-m-ades-projects\.vercel\.app$",
+    r"^https://scoup-frontend[\w-]*\.vercel\.app$",
+    r"^https://scoup-frontend-2-0[\w-]*\.vercel\.app$",
 ]
-CSRF_TRUSTED_ORIGINS = FRONTEND_ORIGINS
+CSRF_TRUSTED_ORIGINS = FRONTEND_ORIGINS + [
+    "https://*.vercel.app",
+]
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
