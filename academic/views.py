@@ -5,7 +5,7 @@ import uuid
 import pdfplumber
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.db.utils import OperationalError
 from django.http import HttpResponse
 from rest_framework import filters, generics, status
@@ -449,13 +449,25 @@ def public_search_data(request):
         .select_related("user", "primary_department", "primary_school")
         .order_by("last_name", "first_name")
     )
+    _faculty_with_affiliations = Faculty.objects.prefetch_related(
+        "schools", "departments"
+    ).select_related("primary_school", "primary_department")
+
     papers_qs = (
         Paper.objects.defer("paper_embedding", "embedding_model", "embedding_updated_at")
-        .prefetch_related("authors")
+        .prefetch_related(Prefetch("authors", queryset=_faculty_with_affiliations))
         .order_by("-id")
     )
-    projects_qs = Project.objects.all().prefetch_related("faculty").order_by("-id")
-    patents_qs = Patent.objects.all().prefetch_related("faculty").order_by("-id")
+    projects_qs = (
+        Project.objects.all()
+        .prefetch_related(Prefetch("faculty", queryset=_faculty_with_affiliations))
+        .order_by("-id")
+    )
+    patents_qs = (
+        Patent.objects.all()
+        .prefetch_related(Prefetch("faculty", queryset=_faculty_with_affiliations))
+        .order_by("-id")
+    )
 
     faculty = []
     for item in faculty_qs:
