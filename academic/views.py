@@ -279,6 +279,10 @@ def _absorb_external_faculty(internal, external):
     candidate_email = _first_non_empty(internal.email, external.email)
     if _email_available_for_faculty(candidate_email, internal.id, external.id):
         internal.email = candidate_email.lower()
+        # Clear from external first to avoid unique constraint violation on save
+        if external.email:
+            external.email = None
+            external.save(update_fields=["email"])
 
     internal.department_affiliations = _merge_unique_list(
         internal.department_affiliations, external.department_affiliations
