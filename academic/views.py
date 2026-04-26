@@ -66,14 +66,15 @@ def _year_from_dates(*dates):
 
 def _normalize_paper_link(download_url, url, license_url, doi):
     for value in (download_url, url, license_url):
-        clean_value = str(value or "").strip()
+        # Strip outer whitespace, then remove any embedded whitespace (spaces, tabs, newlines in URLs are invalid)
+        clean_value = re.sub(r'\s+', '', str(value or "").strip())
         if not clean_value:
             continue
         if clean_value.startswith(("http://", "https://")):
             return clean_value
 
     # Only fall back to DOI if it looks complete (has a slash after the prefix e.g. 10.xxxx/yyyy)
-    clean_doi = str(doi or "").strip()
+    clean_doi = re.sub(r'\s+', '', str(doi or "").strip())
     if clean_doi and clean_doi.count("/") >= 1:
         parts = clean_doi.split("/", 1)
         if len(parts[1]) > 3:  # suffix must be more than 3 characters
