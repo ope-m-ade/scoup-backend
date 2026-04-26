@@ -1274,12 +1274,9 @@ def faculty_me_suggestions(request):
     internal_keywords = _keywords_for_matching(faculty)
 
     query = Q()
-    if first_name:
-        query |= Q(first_name__iexact=first_name) | Q(name__icontains=first_name)
-    if last_name:
-        query |= Q(last_name__iexact=last_name) | Q(name__icontains=last_name)
-    if department:
-        query |= Q(department__icontains=department)
+    if first_name and last_name:
+        query |= Q(first_name__iexact=first_name, last_name__iexact=last_name)
+        query |= Q(name__icontains=first_name) & Q(name__icontains=last_name)
     if email:
         query |= Q(email__iexact=email)
 
