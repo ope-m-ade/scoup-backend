@@ -72,9 +72,12 @@ def _normalize_paper_link(download_url, url, license_url, doi):
         if clean_value.startswith(("http://", "https://")):
             return clean_value
 
+    # Only fall back to DOI if it looks complete (has a slash after the prefix e.g. 10.xxxx/yyyy)
     clean_doi = str(doi or "").strip()
-    if clean_doi:
-        return f"https://doi.org/{clean_doi}"
+    if clean_doi and clean_doi.count("/") >= 1:
+        parts = clean_doi.split("/", 1)
+        if len(parts[1]) > 3:  # suffix must be more than 3 characters
+            return f"https://doi.org/{clean_doi}"
 
     return ""
 
