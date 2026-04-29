@@ -1,33 +1,7 @@
-# Python
+.env
 __pycache__/
 *.py[cod]
-*.so
-
-# Virtual environments
+*.sqlite3
 venv/
-env/
-.env
-.venv/
-
-# Django
-*.log
-*.pot
-*.pyc
-db.sqlite3
-/media/
-/staticfiles/
-/static/
-/media/
-
-# macOS
-.DS_Store
-
-# IDE files
-.vscode/
-.idea/
-
-# Environment variables
-.env
-database_backups/*.sqlite3
-database_backups/*.json
-.claude/
+media/
+staticfiles/

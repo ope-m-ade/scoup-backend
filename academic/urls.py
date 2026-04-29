@@ -29,12 +29,25 @@ from .views import (
     contact_settings,
     admin_contact_settings,
     admin_contact_team_photo_upload,
+    # Admin management endpoints
+    AdminSchoolListCreateView,
+    AdminSchoolDetailView,
+    AdminDepartmentListCreateView,
+    AdminDepartmentDetailView,
+    admin_faculty_list,
+    admin_faculty_detail,
+    admin_paper_list,
+    admin_paper_detail,
+    admin_project_detail,
+    admin_patent_detail,
+    unified_search,
 )
 from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 urlpatterns = [
     path('', views.home, name='home'),
+    path("search/", unified_search, name="unified-search"),
     path("public/search-data/", public_search_data, name="public-search-data"),
     path("network/discovery/", network_discovery, name="network-discovery"),
     path("semantic/papers/", semantic_paper_search, name="semantic-paper-search"),
@@ -76,4 +89,20 @@ urlpatterns = [
     path("admin/contact/team/<int:pk>/", admin_contact_team_detail, name="admin-contact-team-detail"),
     path("admin/contact/settings/", admin_contact_settings, name="admin-contact-settings"),
     path("admin/contact/team/<int:pk>/photo/", admin_contact_team_photo_upload, name="admin-contact-team-photo"),
+
+    # Schools & Departments
+    path("admin/schools/", AdminSchoolListCreateView.as_view(), name="admin-school-list"),
+    path("admin/schools/<int:pk>/", AdminSchoolDetailView.as_view(), name="admin-school-detail"),
+    path("admin/departments/", AdminDepartmentListCreateView.as_view(), name="admin-department-list"),
+    path("admin/departments/<int:pk>/", AdminDepartmentDetailView.as_view(), name="admin-department-detail"),
+
+    # Faculty admin
+    path("admin/faculty/", admin_faculty_list, name="admin-faculty-list"),
+    path("admin/faculty/<int:pk>/", admin_faculty_detail, name="admin-faculty-detail"),
+
+    # Papers, Projects, Patents admin
+    path("admin/papers/", admin_paper_list, name="admin-paper-list"),
+    path("admin/papers/<int:pk>/", admin_paper_detail, name="admin-paper-detail"),
+    path("admin/projects/<int:pk>/", admin_project_detail, name="admin-project-detail"),
+    path("admin/patents/<int:pk>/", admin_patent_detail, name="admin-patent-detail"),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

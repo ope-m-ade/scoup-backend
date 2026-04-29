@@ -16,14 +16,6 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .affiliations import (
-    extract_departments_from_faculty_affiliations,
-    extract_salisbury_departments,
-    extract_salisbury_schools,
-    extract_schools_from_faculty_affiliations,
-    sanitize_department_label,
-    sanitize_school_label,
-)
 from .models import (
     Faculty,
     FacultySuggestionDecision,
@@ -31,6 +23,8 @@ from .models import (
     PaperAuthorship,
     Patent,
     Project,
+    School,
+    Department,
     ContactTeamMember,
     ContactPageSettings,
 )
@@ -40,9 +34,10 @@ from .serializers import (
     PaperSerializer,
     PatentSerializer,
     ProjectSerializer,
+    SchoolSerializer,
+    DepartmentSerializer,
     ContactTeamMemberSerializer,
     ContactPageSettingsSerializer,
-
 )
 from .semantic import cosine_similarity, create_query_embedding
 
@@ -119,42 +114,6 @@ def _merge_unique_list(*values):
     return ordered
 
 
-def _legacy_school_names(faculty):
-    sanitized = []
-    if getattr(faculty, "school", None):
-        clean = sanitize_school_label(faculty.school)
-        if clean:
-            sanitized.append(clean)
-    return _merge_unique_list(
-        sanitized,
-        extract_salisbury_schools(
-            _merge_unique_list(
-                getattr(faculty, "school_affiliations", []),
-                getattr(faculty, "department_affiliations", []),
-                [faculty.school] if getattr(faculty, "school", None) else [],
-                [faculty.department] if getattr(faculty, "department", None) else [],
-            )
-        ),
-    )
-
-
-def _legacy_department_names(faculty):
-    sanitized = []
-    if getattr(faculty, "department", None):
-        clean = sanitize_department_label(faculty.department)
-        if clean:
-            sanitized.append(clean)
-    return _merge_unique_list(
-        sanitized,
-        extract_salisbury_departments(
-            _merge_unique_list(
-                getattr(faculty, "department_affiliations", []),
-                getattr(faculty, "school_affiliations", []),
-                [faculty.department] if getattr(faculty, "department", None) else [],
-                [faculty.school] if getattr(faculty, "school", None) else [],
-            )
-        ),
-    )
 
 
 def _has_salisbury_department(faculty):
@@ -166,7 +125,7 @@ def _faculty_school_names(faculty):
     if getattr(faculty, "primary_school_id", None):
         names.append(faculty.primary_school.name)
     names.extend([school.name for school in faculty.schools.all()])
-    return _merge_unique_list(names, _legacy_school_names(faculty))
+    return _merge_unique_list(names)
 
 
 def _faculty_department_names(faculty):
@@ -174,7 +133,7 @@ def _faculty_department_names(faculty):
     if getattr(faculty, "primary_department_id", None):
         names.append(faculty.primary_department.name)
     names.extend([department.name for department in faculty.departments.all()])
-    return _merge_unique_list(names, _legacy_department_names(faculty))
+    return _merge_unique_list(names)
 
 
 def _is_confirmed_su_faculty(faculty):
@@ -501,7 +460,7 @@ def public_search_data(request):
                 "id": str(item.id),
                 "name": full_name,
                 "title": item.title or "",
-                "department": departments[0] if departments else "",
+                "department": departments[0] if departments else "Unassigned",
                 "departmentAffiliations": departments,
                 "school": schools[0] if schools else "",
                 "schoolAffiliations": schools,
@@ -528,11 +487,9 @@ def public_search_data(request):
         )
         authors = list(item.authors.all())
         paper_departments = _merge_unique_list(
-            extract_departments_from_faculty_affiliations(item.faculty_affiliations),
             *[_faculty_department_names(author) for author in authors],
         )
         paper_schools = _merge_unique_list(
-            extract_schools_from_faculty_affiliations(item.faculty_affiliations),
             *[_faculty_school_names(author) for author in authors],
         )
         papers.append(
@@ -687,7 +644,7 @@ def network_discovery(request):
                 "id": str(item.id),
                 "name": name,
                 "title": item.title or "",
-                "department": departments[0] if departments else "",
+                "department": departments[0] if departments else "Unassigned",
                 "departments": departments,
                 "school": schools[0] if schools else "",
                 "schools": schools,
@@ -719,18 +676,10 @@ def network_discovery(request):
         authors = list(item.authors.all())
         if not any(_is_confirmed_su_faculty(author) for author in authors):
             continue
-        raw_affiliation_departments = extract_departments_from_faculty_affiliations(
-            item.faculty_affiliations
-        )
-        raw_affiliation_schools = extract_schools_from_faculty_affiliations(
-            item.faculty_affiliations
-        )
         departments = _merge_unique_list(
-            raw_affiliation_departments,
             *[_faculty_department_names(author) for author in authors],
         )
         schools = _merge_unique_list(
-            raw_affiliation_schools,
             *[_faculty_school_names(author) for author in authors],
         )
         keywords = _merge_unique_list(item.keywords, item.ai_keywords, item.faculty_keywords, item.themes)
@@ -855,7 +804,7 @@ def network_discovery(request):
                 "startDate": item.start_date.isoformat() if item.start_date else "",
                 "endDate": item.end_date.isoformat() if item.end_date else "",
                 "keywords": keywords,
-                "department": departments[0] if departments else "",
+                "department": departments[0] if departments else "Unassigned",
                 "departments": departments,
                 "school": schools[0] if schools else "",
                 "schools": schools,
@@ -1019,6 +968,490 @@ def semantic_paper_search(request):
         }
     )
 
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def unified_search(request):
+    """
+    SCOUP Unified Search Engine
+    ────────────────────────────────────────────────────────────────────
+    GET /api/search/?q=<query>
+
+    Architecture (4 layers):
+      1. Query parsing   — strip stopwords, extract meaningful terms
+      2. Term rarity     — IDF weight per term (rare = high signal)
+      3. Smart scoring   — exact keyword > partial > bio, weighted by rarity
+      4. Paper semantic  — cosine similarity against stored embeddings
+
+    Faculty are scored per-keyword (not blob matching).
+    Papers are scored semantically via OpenAI embeddings.
+    ────────────────────────────────────────────────────────────────────
+    """
+    import math
+
+    query = (request.query_params.get("q") or "").strip()
+    if len(query) < 2:
+        return Response({"results": [], "count": 0, "query": query})
+
+    # ── Layer 1: Query parsing ────────────────────────────────────────
+    _STOPWORDS = {
+        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+        "of", "with", "by", "from", "is", "it", "its", "as", "be", "was",
+        "are", "were", "have", "has", "do", "does", "did", "not", "no",
+        "so", "that", "this", "what", "who", "how", "can", "could", "would",
+        "will", "may", "might", "some", "any", "all", "more", "than", "me",
+        "my", "we", "our", "you", "your", "he", "she", "they", "them",
+        "find", "get", "give", "look", "looking", "about", "into", "show",
+        "want", "need", "use", "using", "used", "work", "working", "works",
+    }
+    phrase = query.lower()
+    words = [w for w in phrase.split() if len(w) >= 3 and w not in _STOPWORDS]
+
+    if not words:
+        return Response({"results": [], "count": 0, "query": query})
+
+    # ── Layer 2: Term rarity (IDF) ────────────────────────────────────
+    # How many confirmed/approved faculty have each query word in their keywords?
+    # Rare words (few matches) get higher weight — they are stronger signals.
+    # Formula: log(total_faculty / (1 + matches)) + 1
+    # Example: "biology" in 60/367 faculty → IDF ≈ 1.8
+    #          "proteomics" in 3/367 faculty → IDF ≈ 4.8
+    eligible_faculty_qs = Faculty.objects.filter(
+        Q(confirmed_su_faculty=True) | Q(is_approved=True)
+    )
+    total_faculty = eligible_faculty_qs.count() or 1
+
+    word_idf = {}
+    for word in words:
+        df = eligible_faculty_qs.filter(
+            Q(ai_keywords__icontains=word)
+            | Q(faculty_keywords__icontains=word)
+            | Q(keywords__icontains=word)
+        ).count()
+        word_idf[word] = round(math.log(total_faculty / (1 + df)) + 1, 3)
+
+    # ── Layer 3: Faculty scoring ──────────────────────────────────────
+    # Pull all faculty who match any query word in any field
+    faculty_q = Q()
+    for word in words:
+        faculty_q |= (
+            Q(ai_keywords__icontains=word)
+            | Q(faculty_keywords__icontains=word)
+            | Q(keywords__icontains=word)
+            | Q(bio__icontains=word)
+            | Q(first_name__icontains=word)
+            | Q(last_name__icontains=word)
+        )
+
+    faculty_qs = (
+        eligible_faculty_qs
+        .filter(faculty_q)
+        .select_related("primary_department", "primary_school")
+        .prefetch_related("departments", "schools")
+        .distinct()[:80]
+    )
+
+    results = []
+
+    for item in faculty_qs:
+        dept_names = _faculty_department_names(item)
+        school_names = _faculty_school_names(item)
+        name = (
+            item.name
+            or f"{item.first_name or ''} {item.last_name or ''}".strip()
+            or item.email or ""
+        )
+
+        # Separate keyword sources by trust level:
+        #   themes         — curated from actual paper content (highest trust)
+        #   faculty_keywords — user-entered research interests (high trust)
+        #   ai_keywords    — Academic Metrics categories, noisy (limited use)
+        themes_list    = _normalize_keyword_list(item.themes)
+        faculty_kws    = _normalize_keyword_list(item.faculty_keywords)
+        ai_kws         = _normalize_keyword_list(item.ai_keywords)
+        # Only use first 8 ai_keywords — beyond that they are broad category noise
+        ai_kws_limited = ai_kws[:8]
+
+        display_keywords = faculty_kws[:8] or ai_kws[:8]
+        bio_text  = (item.bio or "").lower()
+        name_text = name.lower()
+
+        raw_score = 0.0
+        matched   = []
+
+        def _kw_score(kw_list, word, exact_pts, boundary_pts):
+            """Score a word against a keyword list. Returns best match score."""
+            best = 0.0
+            for kw in kw_list:
+                kw_l = kw.lower()
+                if kw_l == word:
+                    best = max(best, exact_pts)
+                elif kw_l.startswith(word + " ") or f" {word}" in kw_l:
+                    best = max(best, boundary_pts)
+                # No substring match — too noisy
+            return best
+
+        for word in words:
+            idf  = word_idf[word]
+            best = 0.0
+
+            # Themes: exact=50, boundary=30 (strongest signal)
+            best = max(best, _kw_score(themes_list, word, 50, 30))
+            # Faculty keywords: exact=40, boundary=22
+            best = max(best, _kw_score(faculty_kws, word, 40, 22))
+            # AI keywords (limited): exact=20, boundary=10
+            best = max(best, _kw_score(ai_kws_limited, word, 20, 10))
+            # Bio text: supporting evidence only
+            if best == 0 and word in bio_text:
+                best = 6.0
+            # Name match
+            if word in name_text:
+                best = max(best, 18.0)
+
+            if best > 0:
+                matched.append(word)
+
+            raw_score += best * idf
+
+        # Normalise to 0–95
+        max_possible = len(words) * 50.0 * max(word_idf.values())
+        confidence = min(95, round((raw_score / max_possible) * 100)) if max_possible > 0 else 0
+
+        # Only return meaningful matches
+        if confidence < 30:
+            continue
+
+        # Justification from actual matched themes/keywords
+        top_matched_kws = [
+            kw for kw in (themes_list + faculty_kws)
+            if any(w in kw.lower() for w in matched)
+        ][:3]
+
+        if top_matched_kws:
+            justification = f"{name} works in {', '.join(top_matched_kws)}."
+        elif dept_names:
+            justification = f"Matched {name}'s profile in {dept_names[0]}."
+        else:
+            justification = f"Matched {name}'s research profile."
+
+        photo_url = request.build_absolute_uri(item.photo.url) if item.photo else ""
+
+        results.append({
+            "type": "faculty",
+            "confidence": confidence,
+            "aiJustification": justification,
+            "matchedKeywords": matched[:8],
+            "data": {
+                "id": str(item.id),
+                "name": name,
+                "title": item.title or "",
+                "department": dept_names[0] if dept_names else "Unassigned",
+                "departmentAffiliations": dept_names,
+                "schoolAffiliations": school_names,
+                "email": item.email or "",
+                "phone": item.phone or "",
+                "photo": photo_url,
+                "bio": item.bio or "",
+                "researchInterests": display_keywords,
+                "aiKeywords": display_keywords,
+                "metricsProfile": {
+                    "totalCitations": item.total_citations or 0,
+                    "articleCount": item.article_count or 0,
+                    "averageCitations": float(item.average_citations or 0),
+                },
+                "themes": _normalize_keyword_list(item.themes),
+                "journals": _normalize_keyword_list(item.journals),
+            },
+        })
+
+    # ── Layer 4: Paper search (semantic + title-exact, always both) ──────
+    #
+    # Strategy: run BOTH semantic search and title/abstract keyword search,
+    # then merge. This ensures papers with an exact title match are ALWAYS
+    # returned, even if their semantic similarity score is below the threshold.
+    #
+    # Semantic: cosine similarity against stored OpenAI embeddings
+    #   (text-embedding-3-small, 1536 dims). Threshold = 0.22.
+    #   Confidence formula: min(95, max(40, round((sim - 0.15) / 0.35 * 100)))
+    #   sim=0.22 → 40%, sim=0.35 → 57%, sim=0.42 → 77%
+    #
+    # Keyword: always runs on title and abstract.
+    #   Title matches score higher than abstract matches.
+    #   An exact all-word title match scores up to 90%.
+    #   Merged results deduplicate by paper id — semantic wins if both find it.
+
+    try:
+        query_embedding = create_query_embedding(query)
+    except Exception:
+        query_embedding = None
+
+    SEMANTIC_THRESHOLD = 0.22
+
+    # --- Semantic pass ---
+    semantic_by_id = {}   # paper.id → (scaled_conf, sim, paper)
+    if query_embedding:
+        try:
+            papers_with_embeddings = (
+                Paper.objects
+                .exclude(paper_embedding=[])
+                .exclude(paper_embedding__isnull=True)
+                .prefetch_related("authors")
+            )
+            for paper in papers_with_embeddings:
+                sim = cosine_similarity(query_embedding, paper.paper_embedding or [])
+                if sim >= SEMANTIC_THRESHOLD:
+                    scaled = min(95, max(40, round((sim - 0.15) / 0.35 * 100)))
+                    semantic_by_id[paper.id] = (scaled, sim, paper)
+        except OperationalError:
+            pass
+
+    # --- Keyword pass (always runs — guarantees exact title matches surface) ---
+    # Critically: papers found by BOTH semantic and keyword take the HIGHER score.
+    # Without this, a paper with an exact title match but low semantic similarity
+    # (sim=0.25 → conf=40%) would be stuck at 40% even though keyword scoring
+    # would give it 85%+. We never want an exact title match to rank below 85%.
+    #
+    # TWO-STAGE query strategy:
+    #   Stage 1 — AND query: all words must appear in the title. Small result set,
+    #             always fully included regardless of limits. This guarantees exact
+    #             title matches (like searching a specific paper name) always surface.
+    #   Stage 2 — OR query: any word in title or abstract. Broader, limited to 20.
+    #             Supplements stage 1 with thematically related papers.
+    title_and_q = Q()
+    for word in words:
+        title_and_q &= Q(title__icontains=word)
+    exact_title_papers = list(
+        Paper.objects.filter(title_and_q).prefetch_related("authors")
+    )
+    exact_title_ids = {p.id for p in exact_title_papers}
+
+    broad_q = Q()
+    for word in words:
+        broad_q |= Q(title__icontains=word) | Q(abstract__icontains=word)
+    broad_papers = list(
+        Paper.objects
+        .filter(broad_q)
+        .exclude(id__in=exact_title_ids)
+        .prefetch_related("authors")[:20]
+    )
+
+    keyword_papers = exact_title_papers + broad_papers
+
+    keyword_by_id = {}  # paper.id → (kw_conf, paper)
+    for paper in keyword_papers:
+        title_lower = (paper.title or "").lower()
+        abstract_lower = (paper.abstract or "").lower()
+        title_hits = sum(1 for w in words if w in title_lower)
+        abstract_hits = sum(1 for w in words if w in abstract_lower)
+        all_in_title = title_hits == len(words)
+        raw = (title_hits * 20) + (abstract_hits * 5)
+        max_raw = len(words) * 20
+        kw_conf = min(90, max(40, round((raw / max_raw) * 90))) if max_raw else 40
+        if all_in_title:
+            kw_conf = max(kw_conf, 85)  # exact title match always gets 85%+
+        keyword_by_id[paper.id] = (kw_conf, paper)
+
+    # --- Merge: take MAX(semantic_conf, keyword_conf) for papers in both ---
+    paper_scored = []  # (conf, sim, paper, is_semantic)
+    seen_ids = set()
+
+    for pid, (sem_conf, sim, paper) in semantic_by_id.items():
+        if pid in keyword_by_id:
+            kw_conf, _ = keyword_by_id[pid]
+            # Paper found by both — use whichever score is higher
+            if kw_conf > sem_conf:
+                paper_scored.append((kw_conf, sim, paper, False))  # keyword wins
+            else:
+                paper_scored.append((sem_conf, sim, paper, True))  # semantic wins
+        else:
+            paper_scored.append((sem_conf, sim, paper, True))
+        seen_ids.add(pid)
+
+    for pid, (kw_conf, paper) in keyword_by_id.items():
+        if pid not in seen_ids:
+            paper_scored.append((kw_conf, 0.0, paper, False))
+
+    paper_scored.sort(key=lambda x: x[0], reverse=True)
+    paper_scored = paper_scored[:15]
+
+    def _paper_justification(paper, paper_keywords, sim, is_semantic):
+        """Build a human-readable justification for why this paper matches."""
+        matched_kws = [k for k in paper_keywords if any(w in k.lower() for w in words)][:3]
+        journal = paper.journal or ""
+        title_lower = (paper.title or "").lower()
+        all_in_title = all(w in title_lower for w in words)
+
+        if all_in_title:
+            return f"Title directly matches your search terms."
+        if is_semantic:
+            if matched_kws:
+                return f"Semantically matched on {', '.join(matched_kws)}."
+            elif journal:
+                return f"Semantically relevant paper published in {journal}."
+            else:
+                return f"Content is semantically similar to your query (score: {sim:.2f})."
+        else:
+            if matched_kws:
+                return f"Keyword match on {', '.join(matched_kws)}."
+            return "Title or abstract contains your search terms."
+
+    for conf, sim, paper, is_semantic in paper_scored:
+        year = _year_from_dates(
+            paper.date_published_online, paper.date_published_print, paper.date_published
+        )
+        paper_keywords = (
+            _normalize_keyword_list(paper.keywords)
+            or _normalize_keyword_list(paper.ai_keywords)
+            or _normalize_keyword_list(paper.faculty_keywords)
+        )
+        matched_paper_kws = [k for k in paper_keywords if any(w in k.lower() for w in words)][:5]
+        results.append({
+            "type": "paper",
+            "confidence": conf,
+            "aiJustification": _paper_justification(paper, paper_keywords, sim, is_semantic),
+            "matchedKeywords": matched_paper_kws or words[:3],
+            "data": {
+                "id": str(paper.id),
+                "title": paper.title or "",
+                "doi": paper.doi or "",
+                "journal": paper.journal or "",
+                "authors": [
+                    a.name or f"{a.first_name or ''} {a.last_name or ''}".strip()
+                    for a in paper.authors.all()
+                ],
+                "year": year or 0,
+                "abstract": paper.abstract or "",
+                "link": _normalize_paper_link(paper.download_url, paper.url, paper.license_url, paper.doi),
+                "aiKeywords": paper_keywords,
+                "citations": paper.tc_count or 0,
+                "semanticScore": round(sim * 100, 1),
+            },
+        })
+
+    # ── Layer 5: Patent search (keyword scoring) ─────────────────────
+    # Patents have no embeddings — scored by keyword match on title, abstract,
+    # and aiKeywords. Faculty inventors are pulled from the many-to-many relation.
+    patent_q = Q()
+    for word in words:
+        patent_q |= (
+            Q(title__icontains=word)
+            | Q(abstract__icontains=word)
+            | Q(aiKeywords__icontains=word)
+        )
+
+    for patent in Patent.objects.filter(patent_q).prefetch_related("faculty")[:10]:
+        title_lower = (patent.title or "").lower()
+        abstract_lower = (patent.abstract or "").lower()
+        kw_lower = str(patent.aiKeywords or "").lower()
+
+        title_hits = sum(1 for w in words if w in title_lower)
+        abstract_hits = sum(1 for w in words if w in abstract_lower)
+        kw_hits = sum(1 for w in words if w in kw_lower)
+
+        all_in_title = title_hits == len(words)
+        raw = (title_hits * 20) + (abstract_hits * 8) + (kw_hits * 12)
+        max_raw = len(words) * 20
+        conf = min(88, max(40, round((raw / max_raw) * 88))) if max_raw else 40
+        if all_in_title:
+            conf = max(conf, 82)
+
+        inventors = [
+            f.name or f"{f.first_name or ''} {f.last_name or ''}".strip()
+            for f in patent.faculty.all()
+        ]
+        patent_kws = _normalize_keyword_list(patent.aiKeywords)
+        matched_kws = [k for k in patent_kws if any(w in k.lower() for w in words)]
+
+        if matched_kws:
+            justification = f"Patent keyword match on {', '.join(matched_kws[:3])}."
+        elif inventors:
+            justification = f"Patent by {', '.join(inventors[:2])} matches your search terms."
+        else:
+            justification = "Patent title or description contains your search terms."
+
+        issue_year = patent.issue_date.year if patent.issue_date else (
+            patent.filing_date.year if patent.filing_date else None
+        )
+
+        results.append({
+            "type": "patent",
+            "confidence": conf,
+            "aiJustification": justification,
+            "matchedKeywords": matched_kws[:5] or words[:3],
+            "data": {
+                "id": str(patent.id),
+                "title": patent.title or "",
+                "patentNumber": patent.patent_number or "",
+                "inventors": inventors,
+                "year": issue_year or 0,
+                "description": patent.abstract or "",
+                "link": patent.link or "",
+                "aiKeywords": patent_kws,
+            },
+        })
+
+    # ── Layer 6: Project search (keyword scoring) ─────────────────────
+    # Projects have no embeddings — scored by keyword match on title, description,
+    # and keywords. Lead faculty pulled from many-to-many relation.
+    project_q = Q()
+    for word in words:
+        project_q |= (
+            Q(title__icontains=word)
+            | Q(description__icontains=word)
+            | Q(keywords__icontains=word)
+        )
+
+    for project in Project.objects.filter(project_q).prefetch_related("faculty")[:10]:
+        title_lower = (project.title or "").lower()
+        desc_lower = (project.description or "").lower()
+        kw_lower = str(project.keywords or "").lower()
+
+        title_hits = sum(1 for w in words if w in title_lower)
+        desc_hits = sum(1 for w in words if w in desc_lower)
+        kw_hits = sum(1 for w in words if w in kw_lower)
+
+        all_in_title = title_hits == len(words)
+        raw = (title_hits * 20) + (desc_hits * 8) + (kw_hits * 12)
+        max_raw = len(words) * 20
+        conf = min(88, max(40, round((raw / max_raw) * 88))) if max_raw else 40
+        if all_in_title:
+            conf = max(conf, 82)
+
+        lead_faculty = [
+            f.name or f"{f.first_name or ''} {f.last_name or ''}".strip()
+            for f in project.faculty.all()
+        ]
+        project_kws = _normalize_keyword_list(project.keywords)
+        matched_kws = [k for k in project_kws if any(w in k.lower() for w in words)]
+
+        if matched_kws:
+            justification = f"Project keyword match on {', '.join(matched_kws[:3])}."
+        elif lead_faculty:
+            justification = f"Project led by {', '.join(lead_faculty[:2])} matches your search terms."
+        else:
+            justification = "Project title or description contains your search terms."
+
+        results.append({
+            "type": "project",
+            "confidence": conf,
+            "aiJustification": justification,
+            "matchedKeywords": matched_kws[:5] or words[:3],
+            "data": {
+                "id": str(project.id),
+                "title": project.title or "",
+                "status": project.status or "Unknown",
+                "leadFaculty": lead_faculty,
+                "startDate": str(project.start_date) if project.start_date else "",
+                "endDate": str(project.end_date) if project.end_date else "",
+                "description": project.description or "",
+                "link": project.link or "",
+                "aiKeywords": project_kws,
+                "fundingSource": project.funding_source or "",
+            },
+        })
+
+    results.sort(key=lambda r: r["confidence"], reverse=True)
+    return Response({"results": results, "count": len(results), "query": query})
 
 
 def home(request):
@@ -1608,3 +2041,287 @@ def admin_contact_team_photo_upload(request, pk):
     member.save()
     serializer = ContactTeamMemberSerializer(member, context={"request": request})
     return Response(serializer.data)
+
+
+# ===========================================================================
+# ADMIN ENDPOINTS — require IsAdminUser
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Schools
+# ---------------------------------------------------------------------------
+
+class AdminSchoolListCreateView(generics.ListCreateAPIView):
+    """
+    GET  /api/admin/schools/  — list all schools
+    POST /api/admin/schools/  — create a new school
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = SchoolSerializer
+    queryset = School.objects.all().order_by("display_order", "name")
+
+
+class AdminSchoolDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET    /api/admin/schools/<id>/  — get school detail
+    PATCH  /api/admin/schools/<id>/  — update school (name, code, display_order, is_active)
+    DELETE /api/admin/schools/<id>/  — delete school (will fail if departments exist — protected)
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = SchoolSerializer
+    queryset = School.objects.all()
+
+
+# ---------------------------------------------------------------------------
+# Departments
+# ---------------------------------------------------------------------------
+
+class AdminDepartmentListCreateView(generics.ListCreateAPIView):
+    """
+    GET  /api/admin/departments/           — list all departments
+    GET  /api/admin/departments/?school=1  — filter by school id
+    POST /api/admin/departments/           — create a new department
+         Body: { "name": "...", "school": <school_id>, "code": "..." }
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = DepartmentSerializer
+
+    def get_queryset(self):
+        qs = Department.objects.select_related("school").order_by("school__name", "name")
+        school_id = self.request.query_params.get("school")
+        if school_id:
+            qs = qs.filter(school_id=school_id)
+        return qs
+
+
+class AdminDepartmentDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET    /api/admin/departments/<id>/  — get department detail
+    PATCH  /api/admin/departments/<id>/  — update (name, school, code, is_active)
+    DELETE /api/admin/departments/<id>/  — delete department
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = DepartmentSerializer
+    queryset = Department.objects.select_related("school")
+
+
+# ---------------------------------------------------------------------------
+# Admin Faculty Management
+# ---------------------------------------------------------------------------
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def admin_faculty_list(request):
+    """
+    GET /api/admin/faculty/
+    Returns all faculty with a `missing_data` flag indicating incomplete records.
+
+    Query params:
+      ?missing=true   — only return faculty with missing department or school
+      ?search=<term>  — filter by name or email
+    """
+    qs = Faculty.objects.prefetch_related(
+        "departments", "schools"
+    ).select_related("primary_department", "primary_school").order_by("last_name", "first_name")
+
+    search = request.query_params.get("search", "").strip()
+    if search:
+        qs = qs.filter(Q(name__icontains=search) | Q(email__icontains=search))
+
+    missing_only = request.query_params.get("missing", "").lower() == "true"
+    if missing_only:
+        qs = qs.filter(primary_department__isnull=True)
+
+    results = []
+    for f in qs:
+        departments = [d.name for d in f.departments.all()]
+        schools = [s.name for s in f.schools.all()]
+        results.append({
+            "id": f.id,
+            "name": f.name or f"{f.first_name or ''} {f.last_name or ''}".strip() or f.faculty_id,
+            "email": f.email or "",
+            "review_status": f.review_status,
+            "confirmed_su_faculty": f.confirmed_su_faculty,
+            "primary_department": {
+                "id": f.primary_department.id,
+                "name": f.primary_department.name,
+            } if f.primary_department else None,
+            "primary_school": {
+                "id": f.primary_school.id,
+                "name": f.primary_school.name,
+            } if f.primary_school else None,
+            "departments": departments,
+            "schools": schools,
+            "missing_data": not f.primary_department_id,
+        })
+
+    return Response(results)
+
+
+@api_view(["PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
+def admin_faculty_detail(request, pk):
+    """
+    PATCH  /api/admin/faculty/<id>/
+    Assign or update department/school affiliations for a faculty member.
+    Body (all fields optional):
+      {
+        "primary_department": <department_id>,
+        "primary_school": <school_id>,
+        "departments": [<department_id>, ...],
+        "schools": [<school_id>, ...],
+        "review_status": "confirmed_su" | "pending" | "external" | "archived" | "rejected",
+        "confirmed_su_faculty": true | false
+      }
+
+    DELETE /api/admin/faculty/<id>/
+    Permanently delete a faculty record from the database.
+    """
+    try:
+        faculty = Faculty.objects.get(pk=pk)
+    except Faculty.DoesNotExist:
+        return Response({"detail": "Faculty not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "DELETE":
+        faculty.delete()
+        return Response({"detail": "Faculty record deleted."}, status=status.HTTP_204_NO_CONTENT)
+
+    data = request.data
+
+    if "primary_department" in data:
+        dept_id = data["primary_department"]
+        if dept_id is None:
+            faculty.primary_department = None
+        else:
+            try:
+                faculty.primary_department = Department.objects.get(pk=dept_id)
+            except Department.DoesNotExist:
+                return Response({"detail": f"Department {dept_id} not found."}, status=400)
+
+    if "primary_school" in data:
+        school_id = data["primary_school"]
+        if school_id is None:
+            faculty.primary_school = None
+        else:
+            try:
+                faculty.primary_school = School.objects.get(pk=school_id)
+            except School.DoesNotExist:
+                return Response({"detail": f"School {school_id} not found."}, status=400)
+
+    if "review_status" in data:
+        faculty.review_status = data["review_status"]
+
+    if "confirmed_su_faculty" in data:
+        faculty.confirmed_su_faculty = bool(data["confirmed_su_faculty"])
+
+    faculty.save()
+
+    if "departments" in data:
+        faculty.departments.set(data["departments"])
+
+    if "schools" in data:
+        faculty.schools.set(data["schools"])
+
+    return Response({
+        "id": faculty.id,
+        "primary_department": faculty.primary_department.name if faculty.primary_department else None,
+        "primary_school": faculty.primary_school.name if faculty.primary_school else None,
+        "review_status": faculty.review_status,
+        "confirmed_su_faculty": faculty.confirmed_su_faculty,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Admin Paper Management
+# ---------------------------------------------------------------------------
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def admin_paper_list(request):
+    """
+    GET /api/admin/papers/
+    Returns all papers with author and link info.
+
+    Query params:
+      ?unlinked=true  — only papers with no linked faculty authors
+      ?search=<term>  — filter by title or DOI
+    """
+    qs = Paper.objects.prefetch_related("authors").order_by("-id")
+
+    search = request.query_params.get("search", "").strip()
+    if search:
+        qs = qs.filter(Q(title__icontains=search) | Q(doi__icontains=search))
+
+    unlinked_only = request.query_params.get("unlinked", "").lower() == "true"
+    if unlinked_only:
+        qs = qs.filter(authors__isnull=True)
+
+    results = []
+    for p in qs:
+        authors = list(p.authors.all())
+        results.append({
+            "id": p.id,
+            "title": p.title,
+            "doi": p.doi or "",
+            "journal": p.journal or "",
+            "year": p.date_published.year if p.date_published else None,
+            "link": _normalize_paper_link(p.download_url, p.url, p.license_url, p.doi),
+            "abstract": (p.abstract or "")[:300],
+            "author_count": len(authors),
+            "authors": [
+                a.name or f"{a.first_name or ''} {a.last_name or ''}".strip()
+                for a in authors
+            ],
+            "missing_data": len(authors) == 0 or not p.abstract,
+        })
+
+    return Response({"count": len(results), "results": results})
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def admin_paper_detail(request, pk):
+    """
+    DELETE /api/admin/papers/<id>/
+    Permanently delete a paper from the database.
+    """
+    try:
+        paper = Paper.objects.get(pk=pk)
+    except Paper.DoesNotExist:
+        return Response({"detail": "Paper not found."}, status=status.HTTP_404_NOT_FOUND)
+    paper.delete()
+    return Response({"detail": "Paper deleted."}, status=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Admin Project & Patent Management
+# ---------------------------------------------------------------------------
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def admin_project_detail(request, pk):
+    """
+    DELETE /api/admin/projects/<id>/
+    Permanently delete a project from the database.
+    """
+    try:
+        project = Project.objects.get(pk=pk)
+    except Project.DoesNotExist:
+        return Response({"detail": "Project not found."}, status=status.HTTP_404_NOT_FOUND)
+    project.delete()
+    return Response({"detail": "Project deleted."}, status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def admin_patent_detail(request, pk):
+    """
+    DELETE /api/admin/patents/<id>/
+    Permanently delete a patent from the database.
+    """
+    try:
+        patent = Patent.objects.get(pk=pk)
+    except Patent.DoesNotExist:
+        return Response({"detail": "Patent not found."}, status=status.HTTP_404_NOT_FOUND)
+    patent.delete()
+    return Response({"detail": "Patent deleted."}, status=status.HTTP_204_NO_CONTENT)

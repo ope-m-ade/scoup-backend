@@ -3,7 +3,33 @@
 import uuid
 from rest_framework import serializers
 
-from .models import Faculty, Paper, Patent, Project, ContactTeamMember, ContactPageSettings
+from .models import Faculty, Paper, Patent, Project, School, Department, ContactTeamMember, ContactPageSettings
+
+
+# ---------------------------------------------------------------------------
+# School & Department
+# ---------------------------------------------------------------------------
+
+class SchoolSerializer(serializers.ModelSerializer):
+    department_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = School
+        fields = ["id", "name", "code", "is_active", "display_order", "department_count"]
+
+    def get_department_count(self, obj):
+        return obj.departments.count()
+
+
+class DepartmentSerializer(serializers.ModelSerializer):
+    school_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Department
+        fields = ["id", "name", "code", "school", "school_name", "is_active"]
+
+    def get_school_name(self, obj):
+        return obj.school.name if obj.school else None
 
 
 class EmptyStringToNoneDateField(serializers.DateField):

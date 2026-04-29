@@ -76,7 +76,7 @@ def create_embeddings(inputs: Iterable[str], model: str) -> List[List[float]]:
     return [item.embedding for item in response.data]
 
 
-def create_query_embedding(query: str, model: str) -> List[float]:
+def create_query_embedding(query: str, model: str = "text-embedding-3-small") -> List[float]:
     values = create_embeddings([query], model=model)
     return values[0] if values else []
 
