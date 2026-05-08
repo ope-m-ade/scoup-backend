@@ -1,16 +1,23 @@
 
+import json
+import os
 import re
+import secrets
 import uuid
 
 import pdfplumber
+import requests as http_requests
+from openai import OpenAI
 from django.contrib.auth.models import User
+from django.core.cache import cache
+from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import Prefetch, Q
 from django.db.utils import OperationalError
 from django.http import HttpResponse
 from rest_framework import filters, generics, status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -218,6 +225,79 @@ def _first_non_empty(*values):
     return None
 
 
+# Matches bare DOIs and doi.org URL prefixes
+_DOI_URL_PREFIX = re.compile(r"https?://(dx\.)?doi\.org/", re.IGNORECASE)
+
+
+def _clean_abstract(raw: str) -> str:
+    """Strip JATS/HTML tags and normalise whitespace."""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw)).strip()
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """Simple word-overlap ratio to verify a search result matches our paper."""
+    a_words = set(re.sub(r"[^a-z0-9 ]", "", a.lower()).split())
+    b_words = set(re.sub(r"[^a-z0-9 ]", "", b.lower()).split())
+    if not a_words or not b_words:
+        return 0.0
+    return len(a_words & b_words) / max(len(a_words), len(b_words))
+
+
+def fetch_abstract(title: str, doi: str | None) -> str | None:
+    """
+    Try to fetch a real abstract for a paper via CrossRef (by DOI) then
+    Semantic Scholar and CrossRef title search (with similarity gating).
+    Returns the abstract string or None if not found.
+    """
+    headers = {"User-Agent": "SCOUP/1.0 (mailto:scoupteam@gmail.com)"}
+
+    # 1. CrossRef by DOI — exact, most reliable
+    if doi:
+        try:
+            r = http_requests.get(
+                f"https://api.crossref.org/works/{doi}",
+                timeout=8, headers=headers,
+            )
+            if r.ok:
+                abstract = _clean_abstract(r.json().get("message", {}).get("abstract", ""))
+                if abstract:
+                    return abstract
+        except Exception:
+            pass
+
+    # 2. Semantic Scholar by title — better abstract coverage
+    try:
+        r = http_requests.get(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            params={"query": title, "fields": "title,abstract", "limit": 3},
+            timeout=8,
+        )
+        if r.ok:
+            for item in r.json().get("data", []):
+                if item.get("abstract") and _title_similarity(title, item.get("title", "")) >= 0.45:
+                    return item["abstract"]
+    except Exception:
+        pass
+
+    # 3. CrossRef title search — verify similarity before accepting
+    try:
+        r = http_requests.get(
+            "https://api.crossref.org/works",
+            params={"query.title": title, "rows": 3, "select": "title,abstract,DOI"},
+            timeout=8, headers=headers,
+        )
+        if r.ok:
+            for item in r.json().get("message", {}).get("items", []):
+                abstract = _clean_abstract(item.get("abstract", ""))
+                item_title = item.get("title", [""])[0] if isinstance(item.get("title"), list) else item.get("title", "")
+                if abstract and _title_similarity(title, item_title) >= 0.45:
+                    return abstract
+    except Exception:
+        pass
+
+    return None
+
+
 def _email_available_for_faculty(email, internal_id, external_id):
     if not email:
         return False
@@ -380,9 +460,6 @@ def _external_faculty_preview_payload(external):
 def _get_request_faculty(user, create_if_missing=False):
     faculty = Faculty.objects.filter(user=user).first()
     if faculty:
-        if faculty.user_id and not faculty.is_approved:
-            faculty.is_approved = True
-            faculty.save(update_fields=["is_approved", "updated_at"])
         return faculty
 
     email = (user.email or "").strip()
@@ -990,8 +1067,6 @@ def home(request):
     )
 
 class FacultyListCreateView(generics.ListCreateAPIView):
-    permission_classes = [AllowAny]
-    authentication_classes = []
     filter_backends = [filters.SearchFilter]
     search_fields = [
         "first_name",
@@ -1003,13 +1078,18 @@ class FacultyListCreateView(generics.ListCreateAPIView):
         "ai_keywords",
         "keywords",
     ]
+    serializer_class = FacultySerializer
+
+    def get_permissions(self):
+        # Public browse (GET); require auth for create (POST)
+        if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            return [AllowAny()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         return Faculty.objects.filter(profile_visibility=True).filter(
             Q(is_approved=True) | Q(user__isnull=False)
         )
-
-    serializer_class = FacultySerializer
 
 class PaperListCreateView(generics.ListCreateAPIView):
     serializer_class = PaperSerializer
@@ -1036,7 +1116,6 @@ class PaperListCreateView(generics.ListCreateAPIView):
             raise NotFound("Faculty profile not found for this user.")
         paper = serializer.save()
         paper.authors.add(faculty)
-        paper.save()
 
 class ProjectListCreateView(generics.ListCreateAPIView):
     serializer_class = ProjectSerializer
@@ -1054,7 +1133,6 @@ class ProjectListCreateView(generics.ListCreateAPIView):
             raise NotFound("Faculty profile not found for this user.")
         project = serializer.save()
         project.faculty.add(faculty)
-        project.save()
 
 class PatentListCreateView(generics.ListCreateAPIView):
     serializer_class = PatentSerializer
@@ -1072,7 +1150,6 @@ class PatentListCreateView(generics.ListCreateAPIView):
             raise NotFound("Faculty profile not found for this user.")
         patent = serializer.save()
         patent.faculty.add(faculty)
-        patent.save()
 
 
 class FacultyDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -1085,8 +1162,6 @@ class FacultyDetailView(generics.RetrieveUpdateDestroyAPIView):
         requestor = _get_request_faculty(self.request.user)
         if self.request.user.is_staff or (requestor and obj.id == requestor.id):
             return obj
-        from rest_framework.exceptions import PermissionDenied
-
         raise PermissionDenied("You can only edit your own faculty profile.")
 
 
@@ -1173,7 +1248,7 @@ def faculty_signup(request):
             first_name=first_name or "",
             last_name=last_name or "",
             name=_full_name(first_name, last_name, username),
-            is_approved=True,
+            is_approved=False,
             profile_visibility=True,
         )
 
@@ -1447,6 +1522,12 @@ class FacultyPhotoUploadView(APIView):
         })
 
 class FacultyUploadCVPapers(APIView):
+    """
+    POST /api/faculty/upload-cv-papers/
+    Upload a CV/resume PDF. Uses OpenAI to extract structured data,
+    then enriches papers with real abstracts from CrossRef/Semantic Scholar.
+    Returns extracted items for faculty review — nothing is saved yet.
+    """
     parser_classes = (MultiPartParser, FormParser)
     permission_classes = [IsAuthenticated]
 
@@ -1454,44 +1535,517 @@ class FacultyUploadCVPapers(APIView):
         faculty = _get_request_faculty(request.user, create_if_missing=True)
         if not faculty:
             return Response(
-                {"detail": "Faculty profile not found for this user."},
+                {"detail": "Faculty profile not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        file = request.FILES.get("file")
 
+        file = request.FILES.get("file")
         if not file:
-            return Response({"error": "No PDF uploaded"}, status=400)
+            return Response({"error": "No PDF uploaded."}, status=400)
+
+        # ── 1. Extract text from PDF ──────────────────────────────────────
         try:
             with pdfplumber.open(file) as pdf:
                 full_text = "\n".join([page.extract_text() or "" for page in pdf.pages])
         except Exception as e:
-            return Response({"error": f"PDF extract error: {str(e)}"}, status=400)
-        entries = []
+            return Response({"error": f"Could not read PDF: {str(e)}"}, status=400)
 
-        doi_pattern = r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+"
+        if not full_text.strip():
+            return Response({"error": "PDF appears to be empty or scanned (no readable text)."}, status=400)
 
-        for line in full_text.split("\n"):
-            doi_match = re.search(doi_pattern, line)
-            if doi_match:
-                entries.append({
-                    "title": line.replace(doi_match.group(), "").strip(),
-                    "doi": doi_match.group()
-                })
+        # ── 2. OpenAI extraction ──────────────────────────────────────────
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            return Response({"error": "OpenAI API key not configured."}, status=500)
 
-        created = []
-        for item in entries:
-            paper, _ = Paper.objects.get_or_create(
-                doi=item["doi"],
-                defaults={"title": item["title"] or "Untitled Paper"}
+        client = OpenAI(api_key=api_key)  # OpenAI imported at top
+
+        prompt = """You are extracting structured academic information from a faculty CV or resume.
+Return a JSON object with exactly these keys:
+
+{
+  "profile": {
+    "title": "academic title only e.g. Professor, Assistant Professor, Associate Professor, or empty string",
+    "bio": "2-3 sentence professional bio based on their work and expertise, or empty string if insufficient info",
+    "department": "department name or empty string"
+  },
+  "papers": [
+    {
+      "title": "full paper title",
+      "year": 2023,
+      "journal": "journal or conference name or empty string",
+      "doi": "DOI string only — e.g. 10.1016/j.xxx or null. Strip any URL prefix like https://doi.org/",
+      "authors": "author list as string or empty string"
+    }
+  ],
+  "patents": [
+    {
+      "title": "patent title",
+      "patent_number": "patent number or empty string",
+      "year": 2020,
+      "inventors": "inventor names or empty string"
+    }
+  ],
+  "projects": [
+    {
+      "title": "project title",
+      "description": "brief description or empty string",
+      "year": 2022
+    }
+  ]
+}
+
+Rules:
+- Extract ALL papers from any section labelled: Publications, Research, Published Intellectual Contributions, Articles, Journal Articles, Conference Papers, Book Chapters, Refereed Articles, or similar
+- For each paper: capture the full title, year, journal/conference, and DOI if present
+- DOIs appear as bare strings (10.xxxx/...) or as links (https://doi.org/10.xxxx/...) — extract just the DOI part after doi.org/
+- Do NOT hallucinate DOIs — only include if explicitly present in the text
+- Do NOT deduplicate — list every paper you find, even if similar titles exist
+- Year must be an integer or null
+- Return valid JSON only"""
+
+        try:
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": full_text[:14000]},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
             )
-            paper.authors.add(faculty)
-            created.append({"title": paper.title, "doi": paper.doi})
+            extracted = json.loads(resp.choices[0].message.content)  # json imported at top
+        except Exception as e:
+            return Response({"error": f"AI extraction failed: {str(e)}"}, status=500)
+
+        raw_papers = extracted.get("papers", [])
+        patents = extracted.get("patents", [])
+        projects = extracted.get("projects", [])
+        profile_info = extracted.get("profile", {})
+
+        # ── Normalise DOI links → bare DOI ───────────────────────────────────
+        # Some CVs list "https://doi.org/10.xxxx/..." — strip the URL prefix
+        for p in raw_papers:
+            doi = (p.get("doi") or "").strip()
+            if doi:
+                doi = _DOI_URL_PREFIX.sub("", doi).strip()
+                p["doi"] = doi or None
+
+        # ── Deduplicate extracted papers (DOI first, then title) ─────────────
+        seen_dois: set = set()
+        seen_titles: set = set()
+        papers = []
+        for p in raw_papers:
+            doi = (p.get("doi") or "").strip().lower()
+            title_key = re.sub(r"[^a-z0-9]", "", (p.get("title") or "").lower())
+            if doi and doi in seen_dois:
+                continue
+            if title_key and title_key in seen_titles:
+                continue
+            if doi:
+                seen_dois.add(doi)
+            if title_key:
+                seen_titles.add(title_key)
+            papers.append(p)
+
+        # ── 3. Enrich papers with real abstracts from CrossRef / Semantic Scholar ──
+        for paper in papers:
+            title = paper.get("title", "")
+            doi = paper.get("doi")
+            paper["abstract"] = fetch_abstract(title, doi) or ""
 
         return Response({
-            "message": "PDF processed",
-            "papers_found": len(created),
-            "papers": created
+            "profile": profile_info,
+            "papers": papers,
+            "patents": patents,
+            "projects": projects,
         })
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def bulk_publish_papers(request):
+    """
+    POST /api/faculty/papers/bulk-publish/
+    Body: { "ids": [1,2,3] }  OR  { "all_draft": true }
+    Sets status='published' on all specified (or all draft) papers belonging to this faculty.
+    """
+    faculty = _get_request_faculty(request.user, create_if_missing=False)
+    if not faculty:
+        return Response({"detail": "Faculty profile not found."}, status=404)
+
+    if request.data.get("all_draft"):
+        qs = Paper.objects.filter(authors=faculty, status=Paper.STATUS_DRAFT)
+    else:
+        ids = [int(i) for i in (request.data.get("ids") or []) if str(i).isdigit()]
+        qs = Paper.objects.filter(id__in=ids, authors=faculty)
+
+    count = qs.update(status=Paper.STATUS_PUBLISHED)
+    return Response({"published": count})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def extract_abstract_from_pdf(request):
+    """
+    POST /api/faculty/extract-abstract/
+    Upload a paper PDF; returns AI-generated abstract extracted from its full text.
+    """
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file uploaded."}, status=400)
+
+    try:
+        with pdfplumber.open(file) as pdf:
+            text = "\n".join([p.extract_text() or "" for p in pdf.pages])
+    except Exception as e:
+        return Response({"error": f"Could not read PDF: {str(e)}"}, status=400)
+
+    if not text.strip():
+        return Response({"error": "PDF appears to be scanned or has no readable text."}, status=400)
+
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return Response({"error": "OpenAI not configured."}, status=500)
+
+    client = OpenAI(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert academic editor. Given the full text of a research paper, "
+                        "extract or reconstruct the abstract. If an abstract is present in the text, return it verbatim. "
+                        "If no abstract is found, write a concise 3-5 sentence academic abstract that accurately "
+                        "summarises the paper's purpose, methods, and findings. "
+                        "Return ONLY the abstract text — no labels, no preamble."
+                    ),
+                },
+                {"role": "user", "content": text[:12000]},
+            ],
+            temperature=0.2,
+        )
+        abstract = resp.choices[0].message.content.strip()
+    except Exception as e:
+        return Response({"error": f"AI extraction failed: {str(e)}"}, status=500)
+
+    return Response({"abstract": abstract})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def generate_faculty_bio(request):
+    """
+    POST /api/faculty/generate-bio/
+    Body: { "name", "title", "department", "qualifications": [...], "research_interests", "keywords": [...] }
+    Returns a real AI-generated professional bio.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return Response({"error": "AI not available."}, status=503)
+
+    data = request.data
+    name = (data.get("name") or "").strip()
+    title = (data.get("title") or "").strip()
+    department = (data.get("department") or "").strip()
+    qualifications = data.get("qualifications") or []
+    research_interests = (data.get("research_interests") or "").strip()
+    keywords = data.get("keywords") or []
+
+    qual_text = "; ".join(
+        f"{q.get('degree','')} from {q.get('institution','')} ({q.get('year','')})"
+        for q in qualifications if q.get("degree")
+    ) if qualifications else ""
+
+    context = f"""Faculty profile details:
+- Name: {name or 'Faculty member'}
+- Title: {title or 'Faculty'}
+- Department: {department or 'not specified'}
+- Qualifications: {qual_text or 'not specified'}
+- Research interests: {research_interests or 'not specified'}
+- Expertise keywords: {', '.join(keywords) if keywords else 'not specified'}"""
+
+    client = OpenAI(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert academic writer. Write a concise, professional 2-3 sentence "
+                        "third-person bio for a faculty member. The bio should highlight their academic title, "
+                        "department, research focus, and any notable qualifications. "
+                        "Sound natural and specific to their actual field — no generic filler. "
+                        "Return only the bio text, no labels or preamble."
+                    ),
+                },
+                {"role": "user", "content": context},
+            ],
+            temperature=0.4,
+        )
+        bio = resp.choices[0].message.content.strip()
+    except Exception as e:
+        return Response({"error": f"AI generation failed: {str(e)}"}, status=500)
+
+    return Response({"bio": bio})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def generate_research_interests(request):
+    """
+    POST /api/faculty/generate-research-interests/
+    Body: { "name", "title", "department", "qualifications", "keywords": [...], "papers": [...] }
+    Returns AI-generated research interest areas as a comma-separated string.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return Response({"error": "AI not available."}, status=503)
+
+    data = request.data
+    title = (data.get("title") or "").strip()
+    department = (data.get("department") or "").strip()
+    qualifications = data.get("qualifications") or []
+    keywords = data.get("keywords") or []
+    papers = data.get("papers") or []  # list of paper titles
+
+    qual_text = "; ".join(
+        f"{q.get('degree','')} in {q.get('institution','')}" for q in qualifications if q.get("degree")
+    ) if qualifications else ""
+
+    paper_titles = "; ".join(str(p) for p in papers[:10]) if papers else ""
+
+    context = f"""Faculty profile:
+- Title: {title or 'Faculty'}
+- Department: {department or 'not specified'}
+- Education: {qual_text or 'not specified'}
+- Existing keywords: {', '.join(keywords) if keywords else 'none'}
+- Recent paper titles: {paper_titles or 'none provided'}"""
+
+    client = OpenAI(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an academic profile specialist. Based on the faculty member's department, "
+                        "education, and paper titles, generate 6-10 specific research interest areas. "
+                        "Return them as a comma-separated list of concise phrases. "
+                        "Be specific to their actual field — no generic terms. "
+                        "Example: 'Machine Learning, Natural Language Processing, Healthcare Informatics, Predictive Analytics'"
+                    ),
+                },
+                {"role": "user", "content": context},
+            ],
+            temperature=0.3,
+        )
+        interests = resp.choices[0].message.content.strip()
+    except Exception as e:
+        return Response({"error": f"AI generation failed: {str(e)}"}, status=500)
+
+    return Response({"research_interests": interests})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def generate_faculty_keywords(request):
+    """
+    POST /api/faculty/generate-profile-keywords/
+    Generates keyword tags for the faculty profile based on their department, bio, research interests.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return Response({"error": "AI not available."}, status=503)
+
+    data = request.data
+    department = (data.get("department") or "").strip()
+    bio = (data.get("bio") or "").strip()
+    research_interests = (data.get("research_interests") or "").strip()
+    title = (data.get("title") or "").strip()
+
+    context = f"Department: {department}\nTitle: {title}\nBio: {bio}\nResearch interests: {research_interests}"
+
+    client = OpenAI(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate 8-12 academic keyword tags for a faculty profile. "
+                        "Return ONLY a JSON array of short keyword strings. "
+                        'Example: ["Machine Learning", "Data Science", "Healthcare AI"]'
+                    ),
+                },
+                {"role": "user", "content": context},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+        )
+        raw = json.loads(resp.choices[0].message.content)
+        keywords = raw.get("keywords") or raw.get("items") or next(
+            (v for v in raw.values() if isinstance(v, list)), []
+        )
+        keywords = [str(k).strip() for k in keywords if k][:12]
+    except Exception as e:
+        return Response({"error": f"AI generation failed: {str(e)}"}, status=500)
+
+    return Response({"keywords": keywords})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def generate_paper_keywords(request):
+    """
+    POST /api/faculty/generate-keywords/
+    Body: { "title": "...", "abstract": "..." }
+    Returns up to 8 AI-generated keywords.
+    """
+    title = (request.data.get("title") or "").strip()
+    abstract = (request.data.get("abstract") or "").strip()
+    if not title:
+        return Response({"error": "Title is required."}, status=400)
+
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return Response({"error": "OpenAI not configured."}, status=500)
+
+    client = OpenAI(api_key=api_key)
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an academic metadata specialist. Given a paper title and optional abstract, "
+                        "generate 6-8 precise academic keywords. Return ONLY a JSON array of keyword strings. "
+                        "Keywords should be specific, searchable, and relevant to the paper's topic, methods, and field. "
+                        'Example: ["Machine Learning", "Healthcare", "Predictive Modeling", "Clinical Data"]'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Title: {title}\n\nAbstract: {abstract}" if abstract else f"Title: {title}",
+                },
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+        )
+        raw = json.loads(resp.choices[0].message.content)
+        # Handle both {"keywords": [...]} and bare array wrapped in object
+        keywords = raw.get("keywords") or raw.get("items") or next(
+            (v for v in raw.values() if isinstance(v, list)), []
+        )
+        keywords = [str(k).strip() for k in keywords if k][:8]
+    except Exception as e:
+        return Response({"error": f"AI generation failed: {str(e)}"}, status=500)
+
+    return Response({"keywords": keywords})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def paper_search_external(request):
+    """
+    GET /api/faculty/paper-search/?q=<title or DOI>
+    Searches CrossRef and Semantic Scholar. Returns up to 10 candidates with abstract.
+    """
+    query = (request.GET.get("q") or "").strip()
+    if not query:
+        return Response({"results": []})
+
+    headers = {"User-Agent": "SCOUP/1.0 (mailto:scoupteam@gmail.com)"}
+
+    results = []
+
+    # If query looks like a DOI — do an exact lookup
+    bare = _DOI_URL_PREFIX.sub("", query).strip()
+    is_doi = bool(re.match(r"10\.\d{4,}/", bare))
+
+    if is_doi:
+        try:
+            r = http_requests.get(
+                f"https://api.crossref.org/works/{bare}",
+                timeout=8, headers=headers,
+            )
+            if r.ok:
+                msg = r.json().get("message", {})
+                title_list = msg.get("title", [])
+                title = title_list[0] if title_list else ""
+                results.append({
+                    "title": title,
+                    "doi": bare,
+                    "journal": (msg.get("container-title") or [""])[0],
+                    "year": (msg.get("published", {}).get("date-parts") or [[None]])[0][0],
+                    "authors": ", ".join(
+                        f"{a.get('given','')} {a.get('family','')}".strip()
+                        for a in (msg.get("author") or [])
+                    ),
+                    "abstract": _clean_abstract(msg.get("abstract", "")),
+                    "source": "CrossRef",
+                })
+        except Exception:
+            pass
+    else:
+        # Semantic Scholar title search
+        try:
+            r = http_requests.get(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params={"query": query, "fields": "title,abstract,year,authors,externalIds,venue", "limit": 8},
+                timeout=8,
+            )
+            if r.ok:
+                for item in r.json().get("data", []):
+                    doi = (item.get("externalIds") or {}).get("DOI") or None
+                    results.append({
+                        "title": item.get("title", ""),
+                        "doi": doi,
+                        "journal": item.get("venue", ""),
+                        "year": item.get("year"),
+                        "authors": ", ".join(a.get("name", "") for a in (item.get("authors") or [])),
+                        "abstract": item.get("abstract", ""),
+                        "source": "Semantic Scholar",
+                    })
+        except Exception:
+            pass
+
+        # CrossRef title search (top 5)
+        try:
+            r = http_requests.get(
+                "https://api.crossref.org/works",
+                params={"query.title": query, "rows": 5, "select": "title,abstract,DOI,container-title,published,author"},
+                timeout=8, headers=headers,
+            )
+            if r.ok:
+                for item in r.json().get("message", {}).get("items", []):
+                    doi = item.get("DOI", "")
+                    # Skip if already in results
+                    if any(d.get("doi", "").lower() == doi.lower() for d in results if doi):
+                        continue
+                    title_list = item.get("title", [])
+                    results.append({
+                        "title": title_list[0] if title_list else "",
+                        "doi": doi or None,
+                        "journal": (item.get("container-title") or [""])[0],
+                        "year": (item.get("published", {}).get("date-parts") or [[None]])[0][0],
+                        "authors": ", ".join(
+                            f"{a.get('given','')} {a.get('family','')}".strip()
+                            for a in (item.get("author") or [])
+                        ),
+                        "abstract": _clean_abstract(item.get("abstract", "")),
+                        "source": "CrossRef",
+                    })
+        except Exception:
+            pass
+
+    return Response({"results": results[:10]})
+
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
@@ -1581,12 +2135,18 @@ def admin_contact_team_photo_upload(request, pk):
 # Schools
 # ---------------------------------------------------------------------------
 
+class IsAdminUser(IsAuthenticated):
+    """Allows access only to staff/superuser accounts."""
+    def has_permission(self, request, view):
+        return bool(super().has_permission(request, view) and (request.user.is_staff or request.user.is_superuser))
+
+
 class AdminSchoolListCreateView(generics.ListCreateAPIView):
     """
     GET  /api/admin/schools/  — list all schools
     POST /api/admin/schools/  — create a new school
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminUser]
     serializer_class = SchoolSerializer
     queryset = School.objects.all().order_by("display_order", "name")
 
@@ -1597,7 +2157,7 @@ class AdminSchoolDetailView(generics.RetrieveUpdateDestroyAPIView):
     PATCH  /api/admin/schools/<id>/  — update school (name, code, display_order, is_active)
     DELETE /api/admin/schools/<id>/  — delete school (will fail if departments exist — protected)
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminUser]
     serializer_class = SchoolSerializer
     queryset = School.objects.all()
 
@@ -1613,7 +2173,7 @@ class AdminDepartmentListCreateView(generics.ListCreateAPIView):
     POST /api/admin/departments/           — create a new department
          Body: { "name": "...", "school": <school_id>, "code": "..." }
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminUser]
     serializer_class = DepartmentSerializer
 
     def get_queryset(self):
@@ -1630,7 +2190,7 @@ class AdminDepartmentDetailView(generics.RetrieveUpdateDestroyAPIView):
     PATCH  /api/admin/departments/<id>/  — update (name, school, code, is_active)
     DELETE /api/admin/departments/<id>/  — delete department
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminUser]
     serializer_class = DepartmentSerializer
     queryset = Department.objects.select_related("school")
 
@@ -1650,6 +2210,8 @@ def admin_faculty_list(request):
       ?missing=true   — only return faculty with missing department or school
       ?search=<term>  — filter by name or email
     """
+    if not (request.user.is_staff or request.user.is_superuser):
+        return Response({"detail": "Admin privileges required."}, status=403)
     qs = Faculty.objects.prefetch_related(
         "departments", "schools"
     ).select_related("primary_department", "primary_school").order_by("last_name", "first_name")
@@ -1662,6 +2224,11 @@ def admin_faculty_list(request):
     if missing_only:
         qs = qs.filter(primary_department__isnull=True)
 
+    # Pending: self-registered, verified institutional email, not yet approved
+    pending_only = request.query_params.get("pending", "").lower() == "true"
+    if pending_only:
+        qs = qs.filter(user__isnull=False, institutional_email_verified=True, is_approved=False)
+
     results = []
     for f in qs:
         departments = [d.name for d in f.departments.all()]
@@ -1670,6 +2237,9 @@ def admin_faculty_list(request):
             "id": f.id,
             "name": f.name or f"{f.first_name or ''} {f.last_name or ''}".strip() or f.faculty_id,
             "email": f.email or "",
+            "institutional_email": f.institutional_email or "",
+            "institutional_email_verified": f.institutional_email_verified,
+            "is_approved": f.is_approved,
             "review_status": f.review_status,
             "confirmed_su_faculty": f.confirmed_su_faculty,
             "primary_department": {
@@ -1691,22 +2261,8 @@ def admin_faculty_list(request):
 @api_view(["PATCH", "DELETE"])
 @permission_classes([IsAuthenticated])
 def admin_faculty_detail(request, pk):
-    """
-    PATCH  /api/admin/faculty/<id>/
-    Assign or update department/school affiliations for a faculty member.
-    Body (all fields optional):
-      {
-        "primary_department": <department_id>,
-        "primary_school": <school_id>,
-        "departments": [<department_id>, ...],
-        "schools": [<school_id>, ...],
-        "review_status": "confirmed_su" | "pending" | "external" | "archived" | "rejected",
-        "confirmed_su_faculty": true | false
-      }
-
-    DELETE /api/admin/faculty/<id>/
-    Permanently delete a faculty record from the database.
-    """
+    if not (request.user.is_staff or request.user.is_superuser):
+        return Response({"detail": "Admin privileges required."}, status=403)
     try:
         faculty = Faculty.objects.get(pk=pk)
     except Faculty.DoesNotExist:
@@ -1768,14 +2324,8 @@ def admin_faculty_detail(request, pk):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def admin_paper_list(request):
-    """
-    GET /api/admin/papers/
-    Returns all papers with author and link info.
-
-    Query params:
-      ?unlinked=true  — only papers with no linked faculty authors
-      ?search=<term>  — filter by title or DOI
-    """
+    if not (request.user.is_staff or request.user.is_superuser):
+        return Response({"detail": "Admin privileges required."}, status=403)
     qs = Paper.objects.prefetch_related("authors").order_by("-id")
 
     search = request.query_params.get("search", "").strip()
@@ -1811,10 +2361,8 @@ def admin_paper_list(request):
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def admin_paper_detail(request, pk):
-    """
-    DELETE /api/admin/papers/<id>/
-    Permanently delete a paper from the database.
-    """
+    if not (request.user.is_staff or request.user.is_superuser):
+        return Response({"detail": "Admin privileges required."}, status=403)
     try:
         paper = Paper.objects.get(pk=pk)
     except Paper.DoesNotExist:
@@ -1830,10 +2378,8 @@ def admin_paper_detail(request, pk):
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def admin_project_detail(request, pk):
-    """
-    DELETE /api/admin/projects/<id>/
-    Permanently delete a project from the database.
-    """
+    if not (request.user.is_staff or request.user.is_superuser):
+        return Response({"detail": "Admin privileges required."}, status=403)
     try:
         project = Project.objects.get(pk=pk)
     except Project.DoesNotExist:
@@ -1845,13 +2391,417 @@ def admin_project_detail(request, pk):
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def admin_patent_detail(request, pk):
-    """
-    DELETE /api/admin/patents/<id>/
-    Permanently delete a patent from the database.
-    """
+    if not (request.user.is_staff or request.user.is_superuser):
+        return Response({"detail": "Admin privileges required."}, status=403)
     try:
         patent = Patent.objects.get(pk=pk)
     except Patent.DoesNotExist:
         return Response({"detail": "Patent not found."}, status=status.HTTP_404_NOT_FOUND)
     patent.delete()
     return Response({"detail": "Patent deleted."}, status=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Password Reset (faculty accounts)
+# ---------------------------------------------------------------------------
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def forgot_password(request):
+    """
+    POST /api/auth/forgot-password/
+    Body: { "email": "user@example.com" }
+
+    Always returns 200 so we don't expose whether an email exists.
+    Sends a reset link to the address if a matching faculty account exists.
+    """
+    email = (request.data.get("email") or "").strip().lower()
+    if not email:
+        return Response({"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        faculty = Faculty.objects.get(email__iexact=email)
+        user = faculty.user
+    except Faculty.DoesNotExist:
+        # Silent — don't reveal whether the email exists
+        return Response({"detail": "If that email is registered, a reset link has been sent."})
+    except Exception:
+        return Response({"detail": "If that email is registered, a reset link has been sent."})
+
+    # Generate a secure token and store it in the cache for 1 hour
+    token = secrets.token_urlsafe(32)
+    cache_key = f"pwd_reset_{token}"
+    cache.set(cache_key, user.pk, timeout=3600)
+
+    # Build the reset URL — uses the frontend origin from the request
+    origin = request.headers.get("Origin") or request.build_absolute_uri("/").rstrip("/")
+    reset_url = f"{origin}/reset-password?token={token}"
+
+    try:
+        send_mail(
+            subject="SCOUP — Password Reset Request",
+            message=(
+                f"Hello {faculty.first_name or user.username},\n\n"
+                f"We received a request to reset your SCOUP password.\n\n"
+                f"Click the link below to choose a new password (valid for 1 hour):\n"
+                f"{reset_url}\n\n"
+                f"If you did not request this, you can safely ignore this email.\n\n"
+                f"— The SCOUP Team"
+            ),
+            from_email=None,  # uses DEFAULT_FROM_EMAIL from settings
+            recipient_list=[email],
+            fail_silently=True,
+        )
+    except Exception:
+        pass  # Never expose mail errors to the client
+
+    return Response({"detail": "If that email is registered, a reset link has been sent."})
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def reset_password(request):
+    """
+    POST /api/auth/reset-password/
+    Body: { "token": "...", "password": "new_password" }
+    """
+    token    = (request.data.get("token") or "").strip()
+    password = (request.data.get("password") or "").strip()
+
+    if not token or not password:
+        return Response(
+            {"detail": "Token and new password are required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if len(password) < 8:
+        return Response(
+            {"detail": "Password must be at least 8 characters."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    cache_key = f"pwd_reset_{token}"
+    user_pk = cache.get(cache_key)
+
+    if not user_pk:
+        return Response(
+            {"detail": "This reset link is invalid or has expired."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        user = User.objects.get(pk=user_pk)
+    except User.DoesNotExist:
+        return Response(
+            {"detail": "User not found."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user.set_password(password)
+    user.save()
+    cache.delete(cache_key)  # one-time use
+
+    return Response({"detail": "Password updated successfully. You can now log in."})
+
+
+# ---------------------------------------------------------------------------
+# OTP email verification
+# ---------------------------------------------------------------------------
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_institutional_otp(request):
+    """
+    POST /api/auth/send-otp/
+    Body: { "institutional_email": "name@salisbury.edu" }
+    Sends a 6-digit OTP to the given address. The faculty must be logged in.
+    """
+    institutional_email = (request.data.get("institutional_email") or "").strip().lower()
+    if not institutional_email:
+        return Response({"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        faculty = request.user.faculty_profile
+    except Exception:
+        return Response({"detail": "Faculty profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    # Generate 6-digit OTP using a cryptographically secure source
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+    cache_key = f"email_otp_{faculty.id}"
+    cache.set(cache_key, {"otp": otp, "email": institutional_email}, timeout=600)
+
+    try:
+        send_mail(
+            subject="SCOUP — Your Verification Code",
+            message=(
+                f"Hello,\n\n"
+                f"Your SCOUP email verification code is:\n\n"
+                f"    {otp}\n\n"
+                f"This code expires in 10 minutes.\n\n"
+                f"If you did not request this, please ignore this email.\n\n"
+                f"— The SCOUP Team"
+            ),
+            from_email=None,  # uses DEFAULT_FROM_EMAIL
+            recipient_list=[institutional_email],
+            fail_silently=False,
+        )
+    except Exception as e:
+        return Response({"detail": f"Failed to send email: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return Response({"detail": "Verification code sent."})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def verify_institutional_otp(request):
+    """
+    POST /api/auth/verify-otp/
+    Body: { "otp": "123456" }
+    Verifies the OTP. On success marks institutional_email_verified=True
+    and notifies admin.
+    """
+    otp_input = (request.data.get("otp") or "").strip()
+    if not otp_input:
+        return Response({"detail": "Code is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        faculty = request.user.faculty_profile
+    except Exception:
+        return Response({"detail": "Faculty profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    cache_key = f"email_otp_{faculty.id}"
+    cached = cache.get(cache_key)
+
+    if not cached:
+        return Response({"detail": "Code has expired. Please request a new one."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if cached["otp"] != otp_input:
+        return Response({"detail": "Incorrect code. Please try again."}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Mark verified and auto-approve — verifying the institutional email is proof of faculty status
+    faculty.institutional_email = cached["email"]
+    faculty.institutional_email_verified = True
+    faculty.is_approved = True
+    faculty.save(update_fields=["institutional_email", "institutional_email_verified", "is_approved", "updated_at"])
+    cache.delete(cache_key)
+
+    # Notify admin
+    admin_emails = list(
+        User.objects.filter(is_staff=True).values_list("email", flat=True)
+    )
+    admin_emails = [e for e in admin_emails if e]
+    if admin_emails:
+        faculty_name = faculty.name or f"{faculty.first_name or ''} {faculty.last_name or ''}".strip() or request.user.username
+        try:
+            send_mail(
+                subject="SCOUP — New Faculty Awaiting Approval",
+                message=(
+                    f"A faculty member has verified their institutional email and is awaiting profile approval.\n\n"
+                    f"Name: {faculty_name}\n"
+                    f"Institutional Email: {cached['email']}\n"
+                    f"Login Email: {faculty.email or request.user.email or 'N/A'}\n\n"
+                    f"Log in to the admin dashboard to review and approve their profile.\n\n"
+                    f"— SCOUP System"
+                ),
+                from_email=None,
+                recipient_list=admin_emails,
+                fail_silently=True,
+            )
+        except Exception:
+            pass  # Don't fail the request if admin notification fails
+
+    return Response({"detail": "Email verified successfully. Your profile is now pending admin approval."})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def admin_approve_faculty(request, pk):
+    if not (request.user.is_staff or request.user.is_superuser):
+        return Response({"detail": "Admin privileges required."}, status=403)
+    try:
+        faculty = Faculty.objects.get(pk=pk)
+    except Faculty.DoesNotExist:
+        return Response({"detail": "Faculty not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    faculty.is_approved = True
+    faculty.save(update_fields=["is_approved", "updated_at"])
+
+    # Email the faculty
+    recipient = faculty.institutional_email or faculty.email
+    if recipient:
+        faculty_name = faculty.name or f"{faculty.first_name or ''} {faculty.last_name or ''}".strip() or "Faculty"
+        try:
+            send_mail(
+                subject="SCOUP — Your Profile Has Been Approved!",
+                message=(
+                    f"Hi {faculty_name},\n\n"
+                    f"Great news! Your SCOUP profile has been reviewed and approved.\n\n"
+                    f"You are now visible in SCOUP's faculty search and collaboration network.\n\n"
+                    f"Log in to your dashboard to complete your profile and start connecting.\n\n"
+                    f"— The SCOUP Team"
+                ),
+                from_email=None,
+                recipient_list=[recipient],
+                fail_silently=True,
+            )
+        except Exception:
+            pass
+
+    return Response({"detail": "Faculty approved and notified."})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def admin_reject_faculty(request, pk):
+    if not (request.user.is_staff or request.user.is_superuser):
+        return Response({"detail": "Admin privileges required."}, status=403)
+    try:
+        faculty = Faculty.objects.get(pk=pk)
+    except Faculty.DoesNotExist:
+        return Response({"detail": "Faculty not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    reason = (request.data.get("reason") or "").strip()
+
+    faculty.is_approved = False
+    faculty.institutional_email_verified = False
+    faculty.save(update_fields=["is_approved", "institutional_email_verified", "updated_at"])
+
+    recipient = faculty.institutional_email or faculty.email
+    if recipient:
+        faculty_name = faculty.name or f"{faculty.first_name or ''} {faculty.last_name or ''}".strip() or "Faculty"
+        reason_line = f"\nReason: {reason}\n" if reason else ""
+        try:
+            send_mail(
+                subject="SCOUP — Profile Verification Update",
+                message=(
+                    f"Hi {faculty_name},\n\n"
+                    f"We were unable to verify your SCOUP faculty profile at this time.{reason_line}\n"
+                    f"If you believe this is an error or have questions, please contact us at scoupteam@gmail.com.\n\n"
+                    f"— The SCOUP Team"
+                ),
+                from_email=None,
+                recipient_list=[recipient],
+                fail_silently=True,
+            )
+        except Exception:
+            pass
+
+    return Response({"detail": "Faculty rejected and notified."})
+
+
+# ---------------------------------------------------------------------------
+# CV import — confirm & save approved items
+# ---------------------------------------------------------------------------
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def confirm_cv_items(request):
+    """
+    POST /api/faculty/confirm-cv-items/
+    Body:
+    {
+      "profile": { "title": "...", "bio": "...", "department": "..." },
+      "papers":  [ { "title": "...", "year": 2023, "journal": "...", "doi": "...", "abstract": "...", "authors": "..." } ],
+      "patents": [ { "title": "...", "patent_number": "...", "year": 2020, "inventors": "..." } ],
+      "projects": [ { "title": "...", "description": "...", "year": 2022 } ]
+    }
+    Saves only the items the faculty approved. Skips duplicates.
+    """
+    faculty = _get_request_faculty(request.user, create_if_missing=False)
+    if not faculty:
+        return Response({"detail": "Faculty profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    saved = {"papers": 0, "patents": 0, "projects": 0, "profile_updated": False}
+
+    # ── Profile fields ────────────────────────────────────────────────────
+    profile_data = request.data.get("profile") or {}
+    profile_changed = False
+    if profile_data.get("title") and not faculty.title:
+        faculty.title = profile_data["title"]
+        profile_changed = True
+    if profile_data.get("bio") and not faculty.bio:
+        faculty.bio = profile_data["bio"]
+        profile_changed = True
+    if profile_changed:
+        faculty.save(update_fields=["title", "bio", "updated_at"])
+        saved["profile_updated"] = True
+
+    # ── Papers ────────────────────────────────────────────────────────────
+    for p in (request.data.get("papers") or []):
+        title = (p.get("title") or "").strip()
+        doi = (p.get("doi") or "").strip() or None
+        if not title:
+            continue
+
+        # Convert bare year integer → "YYYY-01-01" date string
+        raw_year = p.get("year")
+        date_published = f"{raw_year}-01-01" if raw_year else None
+
+        if doi:
+            paper, _ = Paper.objects.get_or_create(
+                doi=doi,
+                defaults={
+                    "title": title,
+                    "journal": p.get("journal") or "",
+                    "abstract": p.get("abstract") or "",
+                    "date_published": date_published,
+                },
+            )
+        else:
+            # Match by title to avoid duplicates
+            paper = Paper.objects.filter(title__iexact=title).first()
+            if not paper:
+                paper = Paper.objects.create(
+                    doi=f"cv-import-{uuid.uuid4().hex[:12]}",
+                    title=title,
+                    journal=p.get("journal") or "",
+                    abstract=p.get("abstract") or "",
+                    date_published=date_published,
+                )
+        paper.status = Paper.STATUS_DRAFT
+        paper.save(update_fields=["status"])
+        paper.authors.add(faculty)
+        saved["papers"] += 1
+
+    # ── Patents ───────────────────────────────────────────────────────────
+    for p in (request.data.get("patents") or []):
+        title = (p.get("title") or "").strip()
+        if not title:
+            continue
+        patent_number = (p.get("patent_number") or "").strip() or f"cv-patent-{uuid.uuid4().hex[:10]}"
+        raw_year = p.get("year")
+        filing_date = f"{raw_year}-01-01" if raw_year else None
+        patent, _ = Patent.objects.get_or_create(
+            patent_number=patent_number,
+            defaults={
+                "title": title,
+                "abstract": p.get("abstract") or "",
+                "filing_date": filing_date,
+            },
+        )
+        patent.faculty.add(faculty)
+        saved["patents"] += 1
+
+    # ── Projects ──────────────────────────────────────────────────────────
+    for p in (request.data.get("projects") or []):
+        title = (p.get("title") or "").strip()
+        if not title:
+            continue
+        raw_year = p.get("year")
+        start_date = f"{raw_year}-01-01" if raw_year else None
+        # Check if this faculty already has a project with this title to avoid
+        # accidentally linking to an unrelated project with the same name.
+        project = Project.objects.filter(title__iexact=title, faculty=faculty).first()
+        if not project:
+            project = Project.objects.create(
+                title=title,
+                description=p.get("description") or "",
+                start_date=start_date,
+            )
+        project.faculty.add(faculty)
+        saved["projects"] += 1
+
+    return Response({
+        "detail": "Items saved successfully.",
+        "saved": saved,
+    })

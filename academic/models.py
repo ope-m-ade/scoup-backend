@@ -69,10 +69,15 @@ class Faculty(models.Model):
     room = models.CharField(max_length=100, blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
     bio = models.TextField(blank=True, null=True)
+    research_interests = models.TextField(blank=True, null=True)
+    qualifications = models.JSONField(default=list, blank=True)  # [{degree, institution, year}]
+    personal_website = models.URLField(max_length=500, blank=True, null=True)
     faculty_keywords = models.TextField(blank=True, null=True)
     ai_keywords = models.TextField(blank=True, null=True)
     profile_visibility = models.BooleanField(default=True)
     is_approved = models.BooleanField(default=False)
+    institutional_email = models.EmailField(blank=True, null=True)
+    institutional_email_verified = models.BooleanField(default=False)
     photo = models.ImageField(upload_to="faculty_photos/", blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -163,6 +168,20 @@ class Paper(models.Model):
     paper_embedding = models.JSONField(default=list, blank=True)
     embedding_model = models.CharField(max_length=64, default="", blank=True)
     embedding_updated_at = models.DateTimeField(null=True, blank=True)
+
+    STATUS_DRAFT = "draft"
+    STATUS_PUBLISHED = "published"
+    STATUS_IN_REVIEW = "in-review"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_PUBLISHED, "Published"),
+        (STATUS_IN_REVIEW, "In Review"),
+    ]
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PUBLISHED,  # existing imported papers stay published
+    )
 
     def __str__(self):
         return self.title

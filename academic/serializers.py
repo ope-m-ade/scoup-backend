@@ -52,10 +52,15 @@ FACULTY_API_FIELDS = [
     "room",
     "phone",
     "bio",
+    "research_interests",
+    "qualifications",
+    "personal_website",
     "faculty_keywords",
     "ai_keywords",
     "profile_visibility",
     "is_approved",
+    "institutional_email",
+    "institutional_email_verified",
     "photo",
     "created_at",
     "updated_at",
@@ -119,18 +124,30 @@ PAPER_API_FIELDS = [
 class PaperSerializer(serializers.ModelSerializer):
     doi = serializers.CharField(required=False, allow_blank=True)
     authors = serializers.CharField(write_only=True, required=False, allow_blank=True)
-    year = serializers.CharField(write_only=True, required=False, allow_blank=True)
-    status = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    year = serializers.SerializerMethodField()
+    year_input = serializers.CharField(write_only=True, required=False, allow_blank=True, source="year")
+    status = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = Paper
-        fields = PAPER_API_FIELDS
+        fields = PAPER_API_FIELDS + ["year_input"]
         read_only_fields = ("authors",)
+
+    def get_year(self, obj):
+        dp = obj.date_published
+        if not dp:
+            return None
+        if isinstance(dp, str):
+            # "YYYY-MM-DD" string — just take the first 4 chars
+            try:
+                return int(dp[:4])
+            except (ValueError, IndexError):
+                return None
+        return dp.year  # proper date object
 
     def create(self, validated_data):
         validated_data.pop("authors", None)
-        year = validated_data.pop("year", None)
-        validated_data.pop("status", None)
+        year = validated_data.pop("year", None)  # comes in as year_input via source="year"
 
         if not validated_data.get("doi"):
             validated_data["doi"] = f"manual:{uuid.uuid4()}"
@@ -147,7 +164,6 @@ class PaperSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         validated_data.pop("authors", None)
         year = validated_data.pop("year", None)
-        validated_data.pop("status", None)
 
         if year:
             try:

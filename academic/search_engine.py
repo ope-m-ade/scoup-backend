@@ -8,11 +8,15 @@ Design rule:
 Score contract used for every result type:
   99  exact title/name match
   97  exact phrase in title/name
-  95  exact phrase in trusted keyword
+  95  exact phrase in faculty-entered or AI-generated keyword
   90  all query terms in title/name
   88  close fuzzy title/name match
+  88  exact paper author match
+  90  exact phrase in department
+  78  exact phrase in imported faculty keyword
+  82  exact phrase in imported paper category keyword
   78  exact phrase in abstract/description
-  62  exact phrase in department
+  62  all query terms in department
   60  all query terms in abstract/description/department
   40-85 semantic embedding match
   <40 filtered out
@@ -44,6 +48,8 @@ STOPWORDS = {
 
 MIN_SCORE = 40
 SEMANTIC_THRESHOLD = 0.22
+MAX_CONSECUTIVE_RESULT_TYPE = 3
+RESULT_DIVERSITY_SCORE_WINDOW = 25
 
 
 @dataclass(frozen=True)
@@ -164,6 +170,68 @@ def coverage(words: list[str], text: str) -> float:
     return sum(1 for word in words if word in text_words) / len(words)
 
 
+def evidence_strength(kind: str) -> str:
+    if kind == "exact":
+        return "exact"
+    if kind in {"phrase", "keyword_phrase", "context_phrase"}:
+        return "phrase"
+    if kind in {"all_terms", "keyword_terms", "context_terms"}:
+        return "all_terms"
+    if kind == "close":
+        return "fuzzy"
+    if kind == "semantic":
+        return "semantic"
+    return "partial"
+
+
+def evidence_payload(evidence: Evidence) -> dict:
+    return {
+        "match_source": evidence.field,
+        "match_strength": evidence_strength(evidence.kind),
+        "matched_value": evidence.value,
+        "matched_terms": list(evidence.matched),
+        "score": evidence.score,
+    }
+
+
+def likely_metadata_text(text: str) -> bool:
+    normalized = normalize_text(text)
+    metadata_markers = (
+        "authors",
+        "published in",
+        "index terms",
+        "acknowledgements",
+        "department",
+        "university",
+        "school of",
+        "college of",
+        "faculty of",
+        "corresponding author",
+        "affiliation",
+        "contributor",
+        "proceedings editor",
+        "program chairs",
+        "funding",
+    )
+    return any(marker in normalized for marker in metadata_markers)
+
+
+def searchable_paper_abstract(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    abstract_match = re.search(r"\*\*abstract:\*\*\s*", raw, flags=re.IGNORECASE)
+    if not abstract_match:
+        return raw
+
+    abstract_start = abstract_match.end()
+    next_section = re.search(r"\n\s*\*\*[^*]+:\*\*", raw[abstract_start:], flags=re.IGNORECASE)
+    if next_section:
+        return raw[abstract_start:abstract_start + next_section.start()].strip()
+    return raw[abstract_start:].strip()
+
+
 def best_evidence(
     *,
     phrase: str,
@@ -194,14 +262,19 @@ def best_evidence(
         for value in values:
             if phrase_in_text(phrase, value):
                 candidates.append(Evidence(phrase_score, "keyword_phrase", field, value, (value,)))
+            elif field == "author" and len(phrase) >= 6 and text_similarity(phrase, value) >= 0.88:
+                candidates.append(Evidence(phrase_score, "keyword_phrase", field, value, (value,)))
             elif words_in_text(words, value):
-                candidates.append(Evidence(max(72, phrase_score - 7), "keyword_terms", field, value, (value,)))
+                candidates.append(Evidence(max(MIN_SCORE, phrase_score - 7), "keyword_terms", field, value, (value,)))
 
     for field, value, phrase_score in context_fields:
+        effective_phrase_score = phrase_score
+        if field == "abstract" and likely_metadata_text(value):
+            effective_phrase_score = min(58, phrase_score)
         if phrase_in_text(phrase, value):
-            candidates.append(Evidence(phrase_score, "context_phrase", field, value, ()))
+            candidates.append(Evidence(effective_phrase_score, "context_phrase", field, value, ()))
         elif words_in_text(words, value):
-            candidates.append(Evidence(min(65, phrase_score - 13), "context_terms", field, value, ()))
+            candidates.append(Evidence(min(65, effective_phrase_score - 13), "context_terms", field, value, ()))
         else:
             cov = coverage(words, value)
             if cov >= 0.67 and len(words) >= 3:
@@ -216,23 +289,71 @@ def best_evidence(
 
 def evidence_justification(entity: str, evidence: Evidence) -> str:
     if evidence.kind == "semantic":
-        return "Semantically similar to your search."
+        return "Semantic match based on the paper's embedded research content."
     if evidence.kind == "exact":
-        return f"Exact {evidence.field} match."
+        if evidence.field == "name":
+            return "Exact faculty name match."
+        if evidence.field == "title":
+            return f"Exact {entity} title match."
+        return f"Exact match in {evidence.field}."
     if evidence.kind == "phrase":
+        if evidence.field == "title":
+            return f"The {entity} title directly contains your search phrase."
         return f"{evidence.field.capitalize()} directly contains your search phrase."
     if evidence.kind == "close":
-        return f"Close {evidence.field} match."
+        if evidence.field == "name":
+            return "Close faculty name match, allowing for spacing or spelling differences."
+        if evidence.field == "title":
+            return f"Close {entity} title match, allowing for minor spelling differences."
+        return f"Close match in {evidence.field}."
     if evidence.kind == "all_terms":
-        return f"{evidence.field.capitalize()} contains all search terms."
+        if evidence.field == "title":
+            return f"The {entity} title contains all meaningful search terms."
+        return f"{evidence.field.capitalize()} contains all meaningful search terms."
     if evidence.kind == "keyword_phrase":
-        return f"Exact keyword match: '{evidence.value}'."
+        if evidence.field == "author":
+            return f"Paper author matches your search: '{evidence.value}'."
+        if evidence.field == "faculty keyword":
+            return f"Faculty-entered keyword matches your search: '{evidence.value}'."
+        if evidence.field == "AI keyword":
+            return f"Recommended research keyword matches your search: '{evidence.value}'."
+        if evidence.field == "raw keyword":
+            return f"Imported faculty keyword/category matches your search: '{evidence.value}'."
+        if evidence.field == "paper AI keyword":
+            return f"Generated paper keyword matches your search: '{evidence.value}'."
+        if evidence.field == "paper faculty keyword":
+            return f"Faculty-provided paper keyword matches your search: '{evidence.value}'."
+        if evidence.field == "paper raw keyword":
+            return f"Paper is categorized under '{evidence.value}'."
+        if evidence.field == "patent keyword":
+            return f"Patent keyword matches your search: '{evidence.value}'."
+        if evidence.field == "project keyword":
+            return f"Project keyword matches your search: '{evidence.value}'."
+        return f"Keyword matches your search: '{evidence.value}'."
     if evidence.kind == "keyword_terms":
-        return f"Keyword contains all search terms: '{evidence.value}'."
+        if evidence.field == "author":
+            return f"Paper author contains all meaningful search terms: '{evidence.value}'."
+        return f"Keyword contains all meaningful search terms: '{evidence.value}'."
     if evidence.kind == "context_phrase":
+        if evidence.field == "department":
+            return "Department affiliation directly matches your search phrase."
+        if evidence.field == "abstract":
+            return "Paper abstract directly contains your search phrase."
+        if evidence.field == "bio":
+            return "Faculty bio directly contains your search phrase."
+        if evidence.field == "description":
+            return f"{entity.capitalize()} description directly contains your search phrase."
         return f"{evidence.field.capitalize()} directly contains your search phrase."
     if evidence.kind == "context_terms":
-        return f"{evidence.field.capitalize()} contains all search terms."
+        if evidence.field == "department":
+            return "Department affiliation contains all meaningful search terms."
+        if evidence.field == "abstract":
+            return "Paper abstract contains all meaningful search terms."
+        if evidence.field == "bio":
+            return "Faculty bio contains all meaningful search terms."
+        if evidence.field == "description":
+            return f"{entity.capitalize()} description contains all meaningful search terms."
+        return f"{evidence.field.capitalize()} contains all meaningful search terms."
     return f"{entity.capitalize()} contains related search terms."
 
 
@@ -255,6 +376,7 @@ def faculty_result(faculty, evidence: Evidence, request) -> dict:
         "type": "faculty",
         "confidence": evidence.score,
         "aiJustification": evidence_justification("faculty", evidence),
+        "matchEvidence": evidence_payload(evidence),
         "matchedKeywords": list(evidence.matched)[:8],
         "data": {
             "id": str(faculty.id),
@@ -289,6 +411,7 @@ def paper_result(paper, evidence: Evidence) -> dict:
         "type": "paper",
         "confidence": evidence.score,
         "aiJustification": evidence_justification("paper", evidence),
+        "matchEvidence": evidence_payload(evidence),
         "matchedKeywords": list(evidence.matched)[:8],
         "data": {
             "id": str(paper.id),
@@ -322,6 +445,7 @@ def patent_result(patent, evidence: Evidence) -> dict:
         "type": "patent",
         "confidence": evidence.score,
         "aiJustification": evidence_justification("patent", evidence),
+        "matchEvidence": evidence_payload(evidence),
         "matchedKeywords": list(evidence.matched)[:8],
         "data": {
             "id": str(patent.id),
@@ -346,6 +470,7 @@ def project_result(project, evidence: Evidence) -> dict:
         "type": "project",
         "confidence": evidence.score,
         "aiJustification": evidence_justification("project", evidence),
+        "matchEvidence": evidence_payload(evidence),
         "matchedKeywords": list(evidence.matched)[:8],
         "data": {
             "id": str(project.id),
@@ -384,10 +509,10 @@ def score_faculty(phrase: str, words: list[str], request) -> list[dict]:
             keyword_fields=[
                 ("faculty keyword", normalize_keyword_list(faculty.faculty_keywords), 95),
                 ("AI keyword", merge_unique_list(faculty.ai_keywords, faculty.themes), 95),
-                ("raw keyword", normalize_keyword_list(faculty.keywords), 72),
+                ("raw keyword", normalize_keyword_list(faculty.keywords), 78),
             ],
             context_fields=[
-                ("department", " ".join(dept_names), 62),
+                ("department", " ".join(dept_names), 90),
                 ("bio", faculty.bio or "", 65),
             ],
         )
@@ -400,15 +525,25 @@ def score_papers_lexical(phrase: str, words: list[str]) -> dict[int, tuple[Paper
     scored = {}
     papers = Paper.objects.prefetch_related("authors").all()
     for paper in papers:
+        author_names = merge_unique_list(
+            [
+                author.name or f"{author.first_name or ''} {author.last_name or ''}".strip()
+                for author in paper.authors.all()
+            ],
+            paper.faculty_members,
+        )
         evidence = best_evidence(
             phrase=phrase,
             words=words,
             primary_fields=[("title", paper.title or "")],
             keyword_fields=[
-                ("paper keyword", merge_unique_list(paper.keywords, paper.ai_keywords, paper.faculty_keywords), 72),
+                ("author", author_names, 88),
+                ("paper AI keyword", normalize_keyword_list(paper.ai_keywords), 92),
+                ("paper faculty keyword", normalize_keyword_list(paper.faculty_keywords), 92),
+                ("paper raw keyword", normalize_keyword_list(paper.keywords), 82),
             ],
             context_fields=[
-                ("abstract", paper.abstract or "", 78),
+                ("abstract", searchable_paper_abstract(paper.abstract), 78),
                 ("journal", paper.journal or "", 60),
             ],
         )
@@ -492,6 +627,38 @@ def score_projects(phrase: str, words: list[str]) -> list[dict]:
     return results
 
 
+def diversify_results(results: list[dict]) -> list[dict]:
+    """
+    Keep relevance as the primary signal, but prevent broad searches from showing
+    a long run of one result type when another type has a reasonably close score.
+    """
+    remaining = list(results)
+    diversified = []
+
+    while remaining:
+        candidate_index = 0
+        recent_types = [
+            result["type"]
+            for result in diversified[-MAX_CONSECUTIVE_RESULT_TYPE:]
+        ]
+        if (
+            len(recent_types) == MAX_CONSECUTIVE_RESULT_TYPE
+            and len(set(recent_types)) == 1
+        ):
+            repeated_type = recent_types[0]
+            current_score = remaining[0]["confidence"]
+            for index, result in enumerate(remaining[1:], start=1):
+                if result["type"] == repeated_type:
+                    continue
+                if current_score - result["confidence"] <= RESULT_DIVERSITY_SCORE_WINDOW:
+                    candidate_index = index
+                    break
+
+        diversified.append(remaining.pop(candidate_index))
+
+    return diversified
+
+
 def run_search(query: str, request) -> dict:
     query = query.strip()
     if len(query) < 2:
@@ -514,4 +681,5 @@ def run_search(query: str, request) -> dict:
         ),
         reverse=True,
     )
+    results = diversify_results(results)
     return {"results": results[:250], "count": len(results), "query": query}
