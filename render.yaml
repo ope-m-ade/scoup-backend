@@ -3,7 +3,7 @@
     name: scoup-backend
     env: python
     buildCommand: "./build.sh"
-    startCommand: "gunicorn scoupdb.wsgi:application"
+    startCommand: "gunicorn scoupdb.wsgi:application --timeout 120 --workers 2"
     envVars:
       - key: DJANGO_SETTINGS_MODULE
         value: scoupdb.settings

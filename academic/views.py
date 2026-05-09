@@ -256,7 +256,7 @@ def fetch_abstract(title: str, doi: str | None) -> str | None:
         try:
             r = http_requests.get(
                 f"https://api.crossref.org/works/{doi}",
-                timeout=8, headers=headers,
+                timeout=4, headers=headers,
             )
             if r.ok:
                 abstract = _clean_abstract(r.json().get("message", {}).get("abstract", ""))
@@ -270,7 +270,7 @@ def fetch_abstract(title: str, doi: str | None) -> str | None:
         r = http_requests.get(
             "https://api.semanticscholar.org/graph/v1/paper/search",
             params={"query": title, "fields": "title,abstract", "limit": 3},
-            timeout=8,
+            timeout=4,
         )
         if r.ok:
             for item in r.json().get("data", []):
@@ -279,21 +279,23 @@ def fetch_abstract(title: str, doi: str | None) -> str | None:
     except Exception:
         pass
 
-    # 3. CrossRef title search — verify similarity before accepting
-    try:
-        r = http_requests.get(
-            "https://api.crossref.org/works",
-            params={"query.title": title, "rows": 3, "select": "title,abstract,DOI"},
-            timeout=8, headers=headers,
-        )
-        if r.ok:
-            for item in r.json().get("message", {}).get("items", []):
-                abstract = _clean_abstract(item.get("abstract", ""))
-                item_title = item.get("title", [""])[0] if isinstance(item.get("title"), list) else item.get("title", "")
-                if abstract and _title_similarity(title, item_title) >= 0.45:
-                    return abstract
-    except Exception:
-        pass
+    # 3. CrossRef title search — only if we have a DOI to anchor the search
+    # (skip for title-only lookups to save time on large CVs)
+    if doi:
+        try:
+            r = http_requests.get(
+                "https://api.crossref.org/works",
+                params={"query.title": title, "rows": 3, "select": "title,abstract,DOI"},
+                timeout=4, headers=headers,
+            )
+            if r.ok:
+                for item in r.json().get("message", {}).get("items", []):
+                    abstract = _clean_abstract(item.get("abstract", ""))
+                    item_title = item.get("title", [""])[0] if isinstance(item.get("title"), list) else item.get("title", "")
+                    if abstract and _title_similarity(title, item_title) >= 0.45:
+                        return abstract
+        except Exception:
+            pass
 
     return None
 
