@@ -48,6 +48,53 @@ STOPWORDS = {
 
 MIN_SCORE = 40
 SEMANTIC_THRESHOLD = 0.22
+
+# Query expansion — maps common abbreviations and informal terms to their
+# full NSF taxonomy equivalents so search works even without exact wording.
+QUERY_EXPANSIONS = {
+    "ai": "artificial intelligence",
+    "ml": "machine learning",
+    "llm": "large language models",
+    "llms": "large language models",
+    "nlp": "natural language processing",
+    "cv": "computer vision",
+    "dl": "deep learning",
+    "nn": "neural networks",
+    "cs": "computer science",
+    "it": "information technology",
+    "db": "database",
+    "hci": "human computer interaction",
+    "iot": "internet of things",
+    "ar": "augmented reality",
+    "vr": "virtual reality",
+    "xr": "extended reality",
+    "ui": "user interface",
+    "ux": "user experience",
+    "devops": "software engineering",
+    "cybersecurity": "computer security",
+    "infosec": "computer security",
+    "bioinformatics": "bioinformatics",
+    "stats": "statistics",
+    "econ": "economics",
+    "psych": "psychology",
+    "bio": "biology",
+    "chem": "chemistry",
+    "phys": "physics",
+    "math": "mathematics",
+    "calc": "mathematics",
+    "geo": "geography",
+    "env": "environmental science",
+    "climate": "environmental science",
+    "neurosci": "neuroscience",
+    "pharma": "pharmacology",
+    "prompt engineering": "artificial intelligence",
+    "generative ai": "artificial intelligence",
+    "chatgpt": "artificial intelligence",
+    "gpt": "artificial intelligence",
+    "transformer": "artificial intelligence",
+    "data science": "statistics",
+    "big data": "computer and information sciences",
+}
 MAX_CONSECUTIVE_RESULT_TYPE = 3
 RESULT_DIVERSITY_SCORE_WINDOW = 25
 
@@ -65,8 +112,26 @@ def normalize_text(value) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
 
 
+def expand_query(query: str) -> str:
+    """Expand abbreviations and informal terms to their full taxonomy equivalents."""
+    normalized = query.strip().lower()
+    # Check full query first (e.g. "prompt engineering")
+    if normalized in QUERY_EXPANSIONS:
+        return query + " " + QUERY_EXPANSIONS[normalized]
+    # Then check individual words
+    words = normalized.split()
+    extras = []
+    for word in words:
+        if word in QUERY_EXPANSIONS:
+            extras.append(QUERY_EXPANSIONS[word])
+    if extras:
+        return query + " " + " ".join(extras)
+    return query
+
+
 def parse_query(query: str) -> tuple[str, list[str]]:
-    phrase = normalize_text(query)
+    expanded = expand_query(query)
+    phrase = normalize_text(expanded)
     words = [word for word in phrase.split() if len(word) >= 3 and word not in STOPWORDS]
     return phrase, words
 
