@@ -53,6 +53,9 @@ from .views import (
     admin_project_detail,
     admin_patent_detail,
     unified_search,
+    categories_list,
+    category_detail,
+    query_expansions,
 )
 from rest_framework_simplejwt.views import (
     TokenRefreshView,
@@ -60,6 +63,9 @@ from rest_framework_simplejwt.views import (
 urlpatterns = [
     path('', views.home, name='home'),
     path("search/", unified_search, name="unified-search"),
+    path("categories/", categories_list, name="categories-list"),
+    path("categories/<slug:slug>/", category_detail, name="category-detail"),
+    path("query-expansions/", query_expansions, name="query-expansions"),
     path("public/search-data/", public_search_data, name="public-search-data"),
     path("network/discovery/", network_discovery, name="network-discovery"),
     path("semantic/papers/", semantic_paper_search, name="semantic-paper-search"),

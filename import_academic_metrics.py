@@ -72,6 +72,10 @@ def import_papers(articles):
             if categories:
                 paper.keywords = categories  # store full category list as searchable keywords
                 paper.ai_keywords = categories
+            if top_cats:
+                paper.top_level_categories = top_cats
+            if mid_cats:
+                paper.mid_level_categories = mid_cats
             if abstract and not paper.abstract:
                 paper.abstract = abstract
             if journal and not paper.journal:
@@ -108,6 +112,8 @@ def import_papers(articles):
                 themes=themes,
                 keywords=categories,
                 ai_keywords=categories,
+                top_level_categories=top_cats,
+                mid_level_categories=mid_cats,
                 faculty_members=faculty_members,
                 faculty_affiliations=faculty_affiliations,
                 tc_count=article.get("tc_count") or 0,

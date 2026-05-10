@@ -463,6 +463,7 @@ def faculty_result(faculty, evidence: Evidence, request) -> dict:
             },
             "themes": normalize_keyword_list(faculty.themes),
             "journals": normalize_keyword_list(faculty.journals),
+            "nsfCategories": normalize_keyword_list(faculty.keywords)[:6],
         },
     }
 

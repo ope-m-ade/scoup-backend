@@ -162,6 +162,8 @@ class Paper(models.Model):
     url = models.URLField(blank=True, null=True)
     keywords = models.JSONField(default=list, blank=True)
     themes = models.JSONField(default=list, blank=True)
+    top_level_categories = models.JSONField(default=list, blank=True)
+    mid_level_categories = models.JSONField(default=list, blank=True)
     faculty_members = models.JSONField(default=list, blank=True)
     faculty_affiliations = models.JSONField(default=dict, blank=True)
     engagement_metrics = models.JSONField(default=dict, blank=True)

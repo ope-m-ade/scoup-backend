@@ -47,7 +47,7 @@ from .serializers import (
     ContactPageSettingsSerializer,
 )
 from .semantic import cosine_similarity, create_query_embedding
-from .search_engine import run_search
+from .search_engine import run_search, QUERY_EXPANSIONS, expand_query
 
 
 def _normalize_keyword_list(value):
@@ -562,6 +562,7 @@ def public_search_data(request):
                 },
                 "themes": _normalize_keyword_list(item.themes),
                 "journals": _normalize_keyword_list(item.journals),
+                "nsfCategories": _normalize_keyword_list(item.keywords)[:6],
             }
         )
 
@@ -1061,6 +1062,220 @@ def unified_search(request):
     result = run_search((request.query_params.get("q") or "").strip(), request)
     return Response(result)
 
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def query_expansions(request):
+    """GET /api/query-expansions/ — returns the abbreviation expansion map."""
+    return Response(QUERY_EXPANSIONS)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def categories_list(request):
+    """
+    GET /api/categories/
+    Returns all top-level NSF taxonomy categories with article + faculty counts
+    and their nested mid-level categories.
+    """
+    from collections import defaultdict
+
+    papers = list(
+        Paper.objects.filter(status=Paper.STATUS_PUBLISHED)
+        .only("id", "top_level_categories", "mid_level_categories")
+        .prefetch_related("authors")
+    )
+
+    # top_cat -> { mid_cats: set, paper_ids: set, faculty_ids: set }
+    top_map = defaultdict(lambda: {"mid_cats": set(), "paper_ids": set(), "faculty_ids": set()})
+    # top_cat -> mid_cat -> { paper_ids, faculty_ids }
+    mid_detail_map = defaultdict(lambda: defaultdict(lambda: {"paper_ids": set(), "faculty_ids": set()}))
+
+    for paper in papers:
+        tops = paper.top_level_categories or []
+        mids = paper.mid_level_categories or []
+        author_ids = [a.id for a in paper.authors.all()]
+        for top in tops:
+            top = top.strip()
+            if not top:
+                continue
+            top_map[top]["paper_ids"].add(paper.id)
+            top_map[top]["faculty_ids"].update(author_ids)
+            for mid in mids:
+                mid = mid.strip()
+                if mid:
+                    top_map[top]["mid_cats"].add(mid)
+                    mid_detail_map[top][mid]["paper_ids"].add(paper.id)
+                    mid_detail_map[top][mid]["faculty_ids"].update(author_ids)
+
+    result = []
+    for top_name, data in sorted(top_map.items()):
+        mid_list = []
+        for mid_name in sorted(data["mid_cats"]):
+            mid_data = mid_detail_map[top_name][mid_name]
+            mid_list.append({
+                "name": mid_name,
+                "slug": mid_name.lower().replace(" ", "-").replace(",", "").replace("(", "").replace(")", ""),
+                "article_count": len(mid_data["paper_ids"]),
+                "faculty_count": len(mid_data["faculty_ids"]),
+            })
+        result.append({
+            "name": top_name,
+            "slug": top_name.lower().replace(" ", "-").replace(",", "").replace("(", "").replace(")", ""),
+            "article_count": len(data["paper_ids"]),
+            "faculty_count": len(data["faculty_ids"]),
+            "mid_level_categories": mid_list,
+        })
+
+    return Response(result)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def category_detail(request, slug):
+    """
+    GET /api/categories/<slug>/
+    Returns papers and faculty for a given top-level or mid-level category slug.
+    Query params:
+      ?level=top|mid  (default: tries both)
+      ?page=1
+      ?page_size=20
+    """
+    page = int(request.query_params.get("page", 1))
+    page_size = min(int(request.query_params.get("page_size", 20)), 100)
+    level = request.query_params.get("level", "")
+
+    def to_slug(s):
+        return s.lower().replace(" ", "-").replace(",", "").replace("(", "").replace(")", "")
+
+    # Fetch all published papers and filter in Python (works on SQLite + PostgreSQL)
+    all_papers = list(
+        Paper.objects.filter(status=Paper.STATUS_PUBLISHED)
+        .prefetch_related("authors")
+        .order_by("-tc_count")
+    )
+
+    matched_papers = []
+    category_name = slug  # fallback display name
+    matched = False
+
+    if level != "mid":
+        # Try top-level match first
+        for paper in all_papers:
+            for top in (paper.top_level_categories or []):
+                if to_slug(top.strip()) == slug:
+                    if not matched:
+                        category_name = top.strip()
+                        matched = True
+                    matched_papers.append(paper)
+                    break
+
+    if not matched and level != "top":
+        # Try mid-level match
+        for paper in all_papers:
+            for mid in (paper.mid_level_categories or []):
+                if to_slug(mid.strip()) == slug:
+                    if not matched:
+                        category_name = mid.strip()
+                        matched = True
+                    matched_papers.append(paper)
+                    break
+
+    if not matched:
+        return Response({"error": "Category not found"}, status=404)
+
+    from collections import Counter
+
+    # --- Aggregate themes across all matched papers ---
+    theme_counter = Counter()
+    # paper_id -> set of themes (for frontend filtering)
+    paper_themes_map = {}
+    for paper in matched_papers:
+        themes = paper.themes or []
+        paper_themes_map[paper.id] = themes
+        for t in themes:
+            t = t.strip()
+            if t:
+                theme_counter[t] += 1
+    top_themes = [{"name": t, "count": c} for t, c in theme_counter.most_common(30)]
+
+    # --- Collect faculty and build faculty -> paper_ids mapping ---
+    faculty_ids = set()
+    faculty_paper_map = {}   # faculty_id -> list of paper_ids
+    for paper in matched_papers:
+        for author in paper.authors.all():
+            faculty_ids.add(author.id)
+            faculty_paper_map.setdefault(author.id, []).append(paper.id)
+
+    faculty_qs = Faculty.objects.filter(id__in=faculty_ids).order_by("-total_citations")
+
+    # Department count
+    departments = set()
+    for f in faculty_qs:
+        if f.department:
+            departments.add(f.department.strip())
+
+    # Citation stats across matched papers
+    total_citations = sum(p.tc_count or 0 for p in matched_papers)
+    citation_avg = round(total_citations / len(matched_papers), 1) if matched_papers else 0
+
+    # --- Build full paper list (no pagination — client filters) ---
+    all_paper_data = []
+    for p in matched_papers:
+        all_paper_data.append({
+            "id": p.id,
+            "title": p.title,
+            "doi": p.doi,
+            "journal": p.journal,
+            "date_published": str(p.date_published) if p.date_published else None,
+            "tc_count": p.tc_count or 0,
+            "themes": paper_themes_map.get(p.id, []),
+            "mid_level_categories": p.mid_level_categories or [],
+            "download_url": p.download_url or None,
+            "authors": [
+                {
+                    "id": a.id,
+                    "name": (a.name or f"{a.first_name or ''} {a.last_name or ''}".strip()),
+                }
+                for a in p.authors.all()
+            ],
+        })
+
+    # --- Build faculty list ---
+    faculty_data = []
+    for f in faculty_qs:
+        paper_ids_for_faculty = faculty_paper_map.get(f.id, [])
+        faculty_data.append({
+            "id": f.id,
+            "name": f.name or f"{f.first_name or ''} {f.last_name or ''}".strip(),
+            "department": f.department,
+            "title": f.title,
+            "total_citations": f.total_citations,
+            "article_count": f.article_count,
+            "photo": request.build_absolute_uri(f.photo.url) if f.photo else None,
+            "themes": (f.themes or [])[:8],
+            "paper_ids": paper_ids_for_faculty,  # used for frontend click filtering
+            "is_approved": f.is_approved,
+            "profile_visibility": f.profile_visibility,
+        })
+
+    return Response({
+        "category_name": category_name,
+        "slug": slug,
+        # Summary stats
+        "stats": {
+            "article_count": len(matched_papers),
+            "faculty_count": len(faculty_ids),
+            "department_count": len(departments),
+            "total_citations": total_citations,
+            "citation_average": citation_avg,
+        },
+        # Panels
+        "themes": top_themes,
+        "faculty": faculty_data,
+        "papers": all_paper_data,
+    })
 
 
 def home(request):
