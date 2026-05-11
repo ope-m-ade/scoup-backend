@@ -23,7 +23,6 @@ Score contract used for every result type:
 """
 
 import ast
-import math
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -558,7 +557,7 @@ def score_faculty(phrase: str, words: list[str], request) -> list[dict]:
     faculty_qs = (
         Faculty.objects
         .filter(confirmed_su_faculty=True) | Faculty.objects.filter(is_approved=True)
-    ).select_related("primary_department", "primary_school").prefetch_related("departments", "schools")
+    ).exclude(user__is_staff=True).exclude(user__is_superuser=True).select_related("primary_department", "primary_school").prefetch_related("departments", "schools")
 
     for faculty in faculty_qs.distinct():
         dept_names = faculty_department_names(faculty)

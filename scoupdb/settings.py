@@ -7,11 +7,21 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key")
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    if os.environ.get("RENDER"):
+        raise RuntimeError("SECRET_KEY environment variable is required in production.")
+    SECRET_KEY = "dev-secret-key-not-for-production"
 
 DEBUG = os.environ.get("DEBUG", "") != "False"
 
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = [
+    "localhost",
+    "127.0.0.1",
+    "scoup-backend.onrender.com",
+    os.environ.get("RENDER_EXTERNAL_HOSTNAME", ""),
+]
+ALLOWED_HOSTS = [h for h in ALLOWED_HOSTS if h]  # remove empty strings
 
 
 INSTALLED_APPS = [
@@ -74,6 +84,12 @@ DATABASES = {
 
 if os.environ.get("RENDER"):
     DEBUG = False
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 
 AUTH_PASSWORD_VALIDATORS = [

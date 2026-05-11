@@ -3,6 +3,11 @@ from django.conf import settings
 from django.conf.urls.static import static
 from . import views
 from .auth import EmailOrUsernameTokenObtainPairView
+from .inquiry_views import (
+    admin_collaboration_inquiries,
+    admin_update_inquiry,
+    submit_collaboration_inquiry,
+)
 from .views import (
     send_institutional_otp,
     verify_institutional_otp,
@@ -56,6 +61,7 @@ from .views import (
     categories_list,
     category_detail,
     query_expansions,
+    change_password,
 )
 from rest_framework_simplejwt.views import (
     TokenRefreshView,
@@ -101,6 +107,7 @@ urlpatterns = [
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("auth/forgot-password/", views.forgot_password, name="forgot-password"),
     path("auth/reset-password/", views.reset_password, name="reset-password"),
+    path("auth/change-password/", change_password, name="change-password"),
     path("auth/send-otp/", send_institutional_otp, name="send-otp"),
     path("auth/verify-otp/", verify_institutional_otp, name="verify-otp"),
     path("faculty/upload-photo/", FacultyPhotoUploadView.as_view()),
@@ -119,6 +126,11 @@ urlpatterns = [
     path("admin/contact/team/<int:pk>/", admin_contact_team_detail, name="admin-contact-team-detail"),
     path("admin/contact/settings/", admin_contact_settings, name="admin-contact-settings"),
     path("admin/contact/team/<int:pk>/photo/", admin_contact_team_photo_upload, name="admin-contact-team-photo"),
+
+    # Collaboration Inquiries
+    path("network/inquire/", submit_collaboration_inquiry, name="submit-collaboration-inquiry"),
+    path("admin/inquiries/", admin_collaboration_inquiries, name="admin-collaboration-inquiries"),
+    path("admin/inquiries/<int:pk>/", admin_update_inquiry, name="admin-update-inquiry"),
 
     # Schools & Departments
     path("admin/schools/", AdminSchoolListCreateView.as_view(), name="admin-school-list"),

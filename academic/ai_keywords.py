@@ -7,7 +7,7 @@ from .search_engine import merge_unique_list, normalize_keyword_list, searchable
 from .semantic import get_openai_client
 
 
-DEFAULT_KEYWORD_MODEL = os.getenv("OPENAI_KEYWORD_MODEL", "gpt-5.4-mini")
+DEFAULT_KEYWORD_MODEL = os.getenv("OPENAI_KEYWORD_MODEL", "gpt-4o-mini")
 
 
 def _clean_text(value, limit=1200):

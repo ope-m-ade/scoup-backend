@@ -288,3 +288,56 @@ class ContactPageSettings(models.Model):
 
     def __str__(self):
         return "Contact Page Settings"
+
+
+class CollaborationInquiry(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_REVIEWED = "reviewed"
+    STATUS_CLOSED = "closed"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_REVIEWED, "Reviewed"),
+        (STATUS_CLOSED, "Closed"),
+    ]
+    SOURCE_FACULTY = "faculty"
+    SOURCE_EXTERNAL = "external"
+    SOURCE_CHOICES = [
+        (SOURCE_FACULTY, "Faculty (internal)"),
+        (SOURCE_EXTERNAL, "External stakeholder"),
+    ]
+
+    # Who sent it — either a logged-in faculty or an anonymous external user
+    from_faculty = models.ForeignKey(
+        Faculty,
+        on_delete=models.CASCADE,
+        related_name="sent_collaboration_inquiries",
+        null=True,
+        blank=True,
+    )
+    # For external (unauthenticated) senders
+    requester_name = models.CharField(max_length=255, blank=True)
+    requester_email = models.EmailField(blank=True)
+    requester_organization = models.CharField(max_length=255, blank=True)
+    source_type = models.CharField(
+        max_length=16, choices=SOURCE_CHOICES, default=SOURCE_FACULTY
+    )
+
+    target_faculty_name = models.CharField(max_length=255)
+    target_faculty_id = models.CharField(max_length=64, blank=True)
+    target_department = models.CharField(max_length=255, blank=True)
+    target_school = models.CharField(max_length=255, blank=True)
+    shared_keywords = models.JSONField(default=list, blank=True)
+    note = models.TextField(blank=True)
+    status = models.CharField(
+        max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING
+    )
+    admin_notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        sender = self.requester_name or (str(self.from_faculty) if self.from_faculty else "unknown")
+        return f"Inquiry: {sender} → {self.target_faculty_name} [{self.status}]"
