@@ -314,11 +314,20 @@ Rules:
                 seen_titles.add(title_key)
             papers.append(p)
 
-        # ── 3. Enrich papers with real abstracts from CrossRef / Semantic Scholar ──
-        for paper in papers:
-            title = paper.get("title", "")
-            doi = paper.get("doi")
-            paper["abstract"] = fetch_abstract(title, doi) or ""
+        # ── 3. Keep upload response fast ────────────────────────────────────
+        # Live abstract enrichment can make several external API calls per paper
+        # and has caused Render/Gunicorn worker timeouts for publication-heavy CVs.
+        # Keep this request focused on extraction; optional enrichment can be
+        # re-enabled for a small sample via env var during testing.
+        enrich_abstracts = os.environ.get("CV_UPLOAD_ENRICH_ABSTRACTS", "False") == "True"
+        max_enriched = int(os.environ.get("CV_UPLOAD_MAX_ABSTRACT_ENRICH", "3"))
+        for index, paper in enumerate(papers):
+            if enrich_abstracts and index < max_enriched:
+                title = paper.get("title", "")
+                doi = paper.get("doi")
+                paper["abstract"] = fetch_abstract(title, doi) or ""
+            else:
+                paper["abstract"] = ""
 
         return Response({
             "profile": profile_info,
