@@ -124,12 +124,7 @@ FRONTEND_ORIGINS = [
     "https://scoup-frontend-2-0-3v4op2cv2-ope-m-ades-projects.vercel.app",
 ]
 
-CORS_ALLOWED_ORIGINS = FRONTEND_ORIGINS
-CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://scoup-frontend[\w-]*\.vercel\.app$",
-    r"^https://scoup-frontend-2-0[\w-]*\.vercel\.app$",
-]
-CORS_ALLOW_CREDENTIALS = True  # needed because requests include Authorization header
+CORS_ALLOW_ALL_ORIGINS = True  # JWT auth is the security layer — origin restriction not needed
 CSRF_TRUSTED_ORIGINS = FRONTEND_ORIGINS + [
     "https://*.vercel.app",
 ]
