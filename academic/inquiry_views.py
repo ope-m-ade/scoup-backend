@@ -3,7 +3,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from .models import CollaborationInquiry, Faculty
+from .models import AdminAuditLog, CollaborationInquiry, Faculty
 
 
 def _full_name(first_name, last_name, fallback=""):
@@ -125,6 +125,7 @@ def admin_collaboration_inquiries(request):
                 "shared_keywords": inq.shared_keywords or [],
                 "note": inq.note,
                 "admin_notes": inq.admin_notes,
+                "reviewed_by": inq.reviewed_by,
             }
         )
     return Response({"count": len(data), "results": data})
@@ -143,6 +144,18 @@ def admin_update_inquiry(request, pk):
 
     if "status" in request.data:
         inquiry.status = request.data["status"]
+        u = request.user
+        inquiry.reviewed_by = f"{u.first_name or ''} {u.last_name or ''}".strip() or u.get_username()
+        # Audit log
+        AdminAuditLog.objects.create(
+            admin_username=u.get_username(),
+            admin_display_name=inquiry.reviewed_by,
+            action=AdminAuditLog.ACTION_UPDATE_INQUIRY,
+            target_type="inquiry",
+            target_id=inquiry.id,
+            target_name=f"{inquiry.target_faculty_name} inquiry",
+            notes=f"Status → {inquiry.status}",
+        )
     if "admin_notes" in request.data:
         inquiry.admin_notes = request.data["admin_notes"]
     inquiry.save()
@@ -151,5 +164,6 @@ def admin_update_inquiry(request, pk):
             "id": inquiry.id,
             "status": inquiry.status,
             "admin_notes": inquiry.admin_notes,
+            "reviewed_by": inquiry.reviewed_by,
         }
     )

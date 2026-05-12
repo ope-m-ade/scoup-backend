@@ -53,6 +53,9 @@ from .views import (
     admin_faculty_detail,
     admin_approve_faculty,
     admin_reject_faculty,
+    admin_bulk_faculty_action,
+    admin_stats,
+    admin_audit_log,
     admin_paper_list,
     admin_paper_detail,
     admin_project_detail,
@@ -140,9 +143,14 @@ urlpatterns = [
 
     # Faculty admin
     path("admin/faculty/", admin_faculty_list, name="admin-faculty-list"),
+    path("admin/faculty/bulk-action/", admin_bulk_faculty_action, name="admin-faculty-bulk-action"),
     path("admin/faculty/<int:pk>/", admin_faculty_detail, name="admin-faculty-detail"),
     path("admin/faculty/<int:pk>/approve/", admin_approve_faculty, name="admin-faculty-approve"),
     path("admin/faculty/<int:pk>/reject/", admin_reject_faculty, name="admin-faculty-reject"),
+
+    # Platform stats & audit log
+    path("admin/stats/", admin_stats, name="admin-stats"),
+    path("admin/audit-log/", admin_audit_log, name="admin-audit-log"),
 
     # Papers, Projects, Patents admin
     path("admin/papers/", admin_paper_list, name="admin-paper-list"),

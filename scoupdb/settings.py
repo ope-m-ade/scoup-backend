@@ -37,10 +37,10 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",  # must be first — before any middleware that generates responses
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -129,6 +129,7 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://scoup-frontend[\w-]*\.vercel\.app$",
     r"^https://scoup-frontend-2-0[\w-]*\.vercel\.app$",
 ]
+CORS_ALLOW_CREDENTIALS = True  # needed because requests include Authorization header
 CSRF_TRUSTED_ORIGINS = FRONTEND_ORIGINS + [
     "https://*.vercel.app",
 ]

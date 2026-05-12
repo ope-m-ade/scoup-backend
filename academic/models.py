@@ -332,6 +332,7 @@ class CollaborationInquiry(models.Model):
         max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING
     )
     admin_notes = models.TextField(blank=True)
+    reviewed_by = models.CharField(max_length=150, blank=True)  # admin display name at time of review
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -341,3 +342,38 @@ class CollaborationInquiry(models.Model):
     def __str__(self):
         sender = self.requester_name or (str(self.from_faculty) if self.from_faculty else "unknown")
         return f"Inquiry: {sender} → {self.target_faculty_name} [{self.status}]"
+
+
+class AdminAuditLog(models.Model):
+    ACTION_APPROVE_FACULTY = "approve_faculty"
+    ACTION_REJECT_FACULTY = "reject_faculty"
+    ACTION_BULK_APPROVE = "bulk_approve"
+    ACTION_BULK_REJECT = "bulk_reject"
+    ACTION_TOGGLE_VISIBILITY = "toggle_visibility"
+    ACTION_DELETE_FACULTY = "delete_faculty"
+    ACTION_UPDATE_INQUIRY = "update_inquiry"
+
+    ACTION_CHOICES = [
+        (ACTION_APPROVE_FACULTY, "Approved Faculty"),
+        (ACTION_REJECT_FACULTY, "Rejected Faculty"),
+        (ACTION_BULK_APPROVE, "Bulk Approved Faculty"),
+        (ACTION_BULK_REJECT, "Bulk Rejected Faculty"),
+        (ACTION_TOGGLE_VISIBILITY, "Toggled Profile Visibility"),
+        (ACTION_DELETE_FACULTY, "Deleted Faculty"),
+        (ACTION_UPDATE_INQUIRY, "Updated Inquiry"),
+    ]
+
+    admin_username = models.CharField(max_length=150)
+    admin_display_name = models.CharField(max_length=255, blank=True)
+    action = models.CharField(max_length=32, choices=ACTION_CHOICES)
+    target_type = models.CharField(max_length=32, blank=True)   # "faculty" | "inquiry"
+    target_id = models.IntegerField(null=True, blank=True)
+    target_name = models.CharField(max_length=255, blank=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.admin_username} → {self.action} ({self.target_name})"

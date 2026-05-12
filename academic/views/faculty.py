@@ -314,7 +314,7 @@ def faculty_me(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(["GET"])
+@api_view(["GET", "PATCH"])
 @permission_classes([IsAuthenticated])
 def admin_me(request):
     if not (request.user.is_staff or request.user.is_superuser):
@@ -323,13 +323,31 @@ def admin_me(request):
             status=status.HTTP_403_FORBIDDEN,
         )
 
+    if request.method == "PATCH":
+        user = request.user
+        if "first_name" in request.data:
+            user.first_name = str(request.data["first_name"]).strip()
+        if "last_name" in request.data:
+            user.last_name = str(request.data["last_name"]).strip()
+        if "email" in request.data:
+            user.email = str(request.data["email"]).strip()
+        user.save()
+
+    user = request.user
+    role = "Superuser" if user.is_superuser else "Staff Admin"
+    display_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.get_username()
+
     return Response(
         {
-            "id": request.user.id,
-            "username": request.user.get_username(),
-            "email": request.user.email,
-            "is_staff": bool(request.user.is_staff),
-            "is_superuser": bool(request.user.is_superuser),
+            "id": user.id,
+            "username": user.get_username(),
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "display_name": display_name,
+            "role": role,
+            "is_staff": bool(user.is_staff),
+            "is_superuser": bool(user.is_superuser),
             "is_admin": True,
         }
     )
