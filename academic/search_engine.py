@@ -131,8 +131,14 @@ def expand_query(query: str) -> str:
 def parse_query(query: str) -> tuple[str, list[str]]:
     expanded = expand_query(query)
     phrase = normalize_text(expanded)
-    words = [word for word in phrase.split() if len(word) >= 3 and word not in STOPWORDS]
-    return phrase, words
+    # Use the original query words (not the expanded form) for "all terms must match"
+    # checks — this prevents expansion tokens like "artificial intelligence" from making
+    # a search for "AI" fail against a project that literally contains "AI".
+    original_words = [
+        w for w in normalize_text(query).split()
+        if len(w) >= 2 and w not in STOPWORDS
+    ]
+    return phrase, original_words
 
 
 def text_similarity(left, right) -> float:
@@ -548,6 +554,9 @@ def project_result(project, evidence: Evidence) -> dict:
             "link": project.link or "",
             "aiKeywords": keywords,
             "fundingSource": project.funding_source or "",
+            "isOpenToCollaboration": project.is_open_to_collaboration,
+            "collaborationInvitation": project.collaboration_invitation or "",
+            "allowStudentInterest": project.allow_student_interest,
         },
     }
 

@@ -253,6 +253,9 @@ def _network_payload_from_unified_search(search_payload, faculty, my_keywords, m
                     "relevanceReason": _combined_internal_reason(search_reason, fit_reason),
                     "searchConfidence": search_confidence,
                     "collaborationScore": fit_score,
+                    "isOpenToCollaboration": item.is_open_to_collaboration,
+                    "collaborationInvitation": item.collaboration_invitation or "",
+                    "allowStudentInterest": item.allow_student_interest,
                 }
             )
 
@@ -495,6 +498,9 @@ def public_search_data(request):
                 "startDate": item.start_date.isoformat() if item.start_date else "",
                 "endDate": item.end_date.isoformat() if item.end_date else "",
                 "aiKeywords": _normalize_keyword_list(item.keywords),
+                "isOpenToCollaboration": item.is_open_to_collaboration,
+                "collaborationInvitation": item.collaboration_invitation or "",
+                "allowStudentInterest": item.allow_student_interest,
                 "departmentAffiliations": _merge_unique_list(
                     *[_faculty_department_names(member) for member in item.faculty.all()]
                 ),

@@ -199,6 +199,9 @@ class Project(models.Model):
     status = models.CharField(max_length=100, blank=True, null=True)
     keywords = models.JSONField(blank=True, null=True)
     link = models.URLField(blank=True, null=True)
+    is_open_to_collaboration = models.BooleanField(default=False)
+    collaboration_invitation = models.TextField(blank=True)
+    allow_student_interest = models.BooleanField(default=True)
 
     def __str__(self):
         return self.title
@@ -326,6 +329,15 @@ class CollaborationInquiry(models.Model):
     target_faculty_id = models.CharField(max_length=64, blank=True)
     target_department = models.CharField(max_length=255, blank=True)
     target_school = models.CharField(max_length=255, blank=True)
+    target_project = models.ForeignKey(
+        Project,
+        on_delete=models.SET_NULL,
+        related_name="collaboration_inquiries",
+        null=True,
+        blank=True,
+    )
+    target_project_title = models.CharField(max_length=300, blank=True)
+    requester_role = models.CharField(max_length=64, blank=True)
     shared_keywords = models.JSONField(default=list, blank=True)
     note = models.TextField(blank=True)
     status = models.CharField(

@@ -6,6 +6,8 @@ from .auth import EmailOrUsernameTokenObtainPairView
 from .inquiry_views import (
     admin_collaboration_inquiries,
     admin_update_inquiry,
+    faculty_collaboration_inquiries,
+    faculty_update_inquiry,
     submit_collaboration_inquiry,
 )
 from .views import (
@@ -132,6 +134,8 @@ urlpatterns = [
 
     # Collaboration Inquiries
     path("network/inquire/", submit_collaboration_inquiry, name="submit-collaboration-inquiry"),
+    path("faculty/inquiries/", faculty_collaboration_inquiries, name="faculty-collaboration-inquiries"),
+    path("faculty/inquiries/<int:pk>/", faculty_update_inquiry, name="faculty-update-inquiry"),
     path("admin/inquiries/", admin_collaboration_inquiries, name="admin-collaboration-inquiries"),
     path("admin/inquiries/<int:pk>/", admin_update_inquiry, name="admin-update-inquiry"),
 
