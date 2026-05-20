@@ -75,6 +75,9 @@ class Faculty(models.Model):
     faculty_keywords = models.TextField(blank=True, null=True)
     ai_keywords = models.TextField(blank=True, null=True)
     profile_visibility = models.BooleanField(default=True)
+    show_email_publicly = models.BooleanField(default=False)
+    show_phone_publicly = models.BooleanField(default=False)
+    allow_messages_through_scoup = models.BooleanField(default=True)
     is_approved = models.BooleanField(default=False)
     institutional_email = models.EmailField(blank=True, null=True)
     institutional_email_verified = models.BooleanField(default=False)
@@ -261,6 +264,30 @@ class FacultySuggestionDecision(models.Model):
     def __str__(self):
         return f"{self.reviewer_id}->{self.external_faculty_id}:{self.decision}"
 
+class FacultyPortalMessage(models.Model):
+    """Direct portal messages between faculty members."""
+    sender = models.ForeignKey(
+        Faculty,
+        on_delete=models.CASCADE,
+        related_name="sent_portal_messages",
+    )
+    recipient = models.ForeignKey(
+        Faculty,
+        on_delete=models.CASCADE,
+        related_name="received_portal_messages",
+    )
+    subject = models.CharField(max_length=255, blank=True, default="")
+    body = models.TextField()
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Message: {self.sender} → {self.recipient} [{self.subject[:40]}]"
+
+
 class ContactTeamMember(models.Model):
     name = models.CharField(max_length=200)
     role = models.CharField(max_length=200)
@@ -284,6 +311,8 @@ class ContactPageSettings(models.Model):
     support_email = models.EmailField(blank=True)
     github_url = models.URLField(blank=True)
     linkedin_url = models.URLField(blank=True)
+    documentation_url = models.URLField(blank=True)
+    api_documentation_url = models.URLField(blank=True)
     address_line_1 = models.CharField(max_length=200, blank=True)
     address_line_2 = models.CharField(max_length=200, blank=True)
     address_line_3 = models.CharField(max_length=200, blank=True)
@@ -304,9 +333,11 @@ class CollaborationInquiry(models.Model):
     ]
     SOURCE_FACULTY = "faculty"
     SOURCE_EXTERNAL = "external"
+    SOURCE_ADMIN = "admin"
     SOURCE_CHOICES = [
         (SOURCE_FACULTY, "Faculty (internal)"),
         (SOURCE_EXTERNAL, "External stakeholder"),
+        (SOURCE_ADMIN, "Admin message"),
     ]
 
     # Who sent it — either a logged-in faculty or an anonymous external user
@@ -324,6 +355,23 @@ class CollaborationInquiry(models.Model):
     source_type = models.CharField(
         max_length=16, choices=SOURCE_CHOICES, default=SOURCE_FACULTY
     )
+
+    # For admin→faculty direct messages: explicit recipient FK (no name-matching ambiguity)
+    recipient_faculty = models.ForeignKey(
+        Faculty,
+        on_delete=models.CASCADE,
+        related_name="received_admin_messages",
+        null=True,
+        blank=True,
+    )
+    sender_admin = models.ForeignKey(
+        "auth.User",
+        on_delete=models.SET_NULL,
+        related_name="sent_admin_messages",
+        null=True,
+        blank=True,
+    )
+    message_subject = models.CharField(max_length=255, blank=True)
 
     target_faculty_name = models.CharField(max_length=255)
     target_faculty_id = models.CharField(max_length=64, blank=True)
@@ -389,3 +437,53 @@ class AdminAuditLog(models.Model):
 
     def __str__(self):
         return f"{self.admin_username} → {self.action} ({self.target_name})"
+
+
+class SupportTicket(models.Model):
+    TYPE_BUG = "bug"
+    TYPE_ACCOUNT = "account"
+    TYPE_CONTENT = "content"
+    TYPE_FEATURE = "feature"
+    TYPE_OTHER = "other"
+    TYPE_CHOICES = [
+        (TYPE_BUG, "Bug Report"),
+        (TYPE_ACCOUNT, "Account Issue"),
+        (TYPE_CONTENT, "Content / Data Issue"),
+        (TYPE_FEATURE, "Feature Request"),
+        (TYPE_OTHER, "Other"),
+    ]
+
+    STATUS_OPEN = "open"
+    STATUS_IN_PROGRESS = "in_progress"
+    STATUS_RESOLVED = "resolved"
+    STATUS_CLOSED = "closed"
+    STATUS_CHOICES = [
+        (STATUS_OPEN, "Open"),
+        (STATUS_IN_PROGRESS, "In Progress"),
+        (STATUS_RESOLVED, "Resolved"),
+        (STATUS_CLOSED, "Closed"),
+    ]
+
+    faculty = models.ForeignKey(
+        Faculty,
+        on_delete=models.CASCADE,
+        related_name="support_tickets",
+        null=True,
+        blank=True,
+    )
+    submitter_name = models.CharField(max_length=255, blank=True)
+    submitter_email = models.EmailField(blank=True)
+    ticket_type = models.CharField(max_length=32, choices=TYPE_CHOICES, default=TYPE_OTHER)
+    subject = models.CharField(max_length=255)
+    description = models.TextField()
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OPEN, db_index=True)
+    admin_notes = models.TextField(blank=True)
+    resolved_by = models.CharField(max_length=150, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"[{self.ticket_type}] {self.subject}"

@@ -16,13 +16,104 @@ from .utils import (
     _year_from_dates,
     _normalize_paper_link,
     _full_name,
-    _keywords_for_matching,
     _merge_unique_list,
     _faculty_school_names,
     _faculty_department_names,
     _is_confirmed_su_faculty,
     _get_request_faculty,
 )
+
+
+COLLABORATION_BRIDGES = [
+    {
+        "label": "Digital humanities",
+        "left": ["natural language processing", "nlp", "text mining", "computational linguistics", "machine learning", "artificial intelligence", "ai", "data science"],
+        "right": ["shakespeare", "shakespearean", "literature", "literary", "drama", "poetry", "theatre", "english", "arts", "humanities", "rhetoric", "archive", "text"],
+        "terms": ["digital humanities", "computational text analysis", "corpus linguistics", "literary analysis", "text mining", "computational linguistics"],
+    },
+    {
+        "label": "Computational biology",
+        "left": ["machine learning", "artificial intelligence", "ai", "data science", "computer science", "software", "algorithm", "analytics"],
+        "right": ["biology", "biological", "genomics", "ecology", "marine", "health", "medical", "clinical", "neuroscience"],
+        "terms": ["bioinformatics", "computational biology", "biomedical informatics", "data-driven biology", "predictive modeling"],
+    },
+    {
+        "label": "Learning analytics",
+        "left": ["machine learning", "artificial intelligence", "ai", "data science", "analytics", "software", "technology"],
+        "right": ["education", "learning", "teaching", "pedagogy", "student", "curriculum", "classroom"],
+        "terms": ["learning analytics", "educational technology", "student success analytics", "human-computer interaction"],
+    },
+    {
+        "label": "Environmental data science",
+        "left": ["machine learning", "artificial intelligence", "ai", "data science", "gis", "geospatial", "modeling", "analytics"],
+        "right": ["environment", "environmental", "climate", "sustainability", "ecology", "water", "coastal", "marine"],
+        "terms": ["environmental data science", "geospatial analytics", "climate modeling", "sustainability analytics"],
+    },
+    {
+        "label": "Business analytics",
+        "left": ["machine learning", "artificial intelligence", "ai", "data science", "analytics", "optimization", "software"],
+        "right": ["business", "marketing", "management", "finance", "economics", "operations", "entrepreneurship"],
+        "terms": ["business analytics", "decision science", "marketing analytics", "operations research", "predictive analytics"],
+    },
+]
+
+
+def _query_contains_any(query_text, terms):
+    normalized = f" {query_text} "
+    return any(f" {term} " in normalized for term in terms)
+
+
+def _collaboration_intent_query(query):
+    normalized = f" {_normalize_query_text(query)} "
+    expanded_terms = []
+    categories = []
+
+    for bridge in COLLABORATION_BRIDGES:
+        left_match = _query_contains_any(normalized, bridge["left"])
+        right_match = _query_contains_any(normalized, bridge["right"])
+        if left_match and right_match:
+            categories.append(bridge["label"])
+            expanded_terms.extend(bridge["terms"])
+
+    for raw, expansion in QUERY_EXPANSIONS.items():
+        if _query_contains_any(normalized, [raw]):
+            expanded_terms.append(expansion)
+
+    expanded_terms = _merge_unique_list(expanded_terms)
+    expanded_query = " ".join([query, *expanded_terms]).strip()
+    return {
+        "originalQuery": query,
+        "expandedQuery": expanded_query,
+        "suggestedCategories": categories,
+        "expandedTerms": expanded_terms,
+    }
+
+
+def _normalize_query_text(value):
+    text = str(value or "").lower()
+    text = "".join(char if char.isalnum() else " " for char in text)
+    return " ".join(text.split())
+
+
+def _faculty_network_keywords(faculty):
+    keywords = _merge_unique_list(
+        getattr(faculty, "keywords", None),
+        getattr(faculty, "faculty_keywords", None),
+        getattr(faculty, "ai_keywords", None),
+        getattr(faculty, "themes", None),
+    )
+    papers = getattr(faculty, "_prefetched_objects_cache", {}).get("papers")
+    if papers is None:
+        papers = faculty.papers.all()[:20]
+    for paper in papers:
+        keywords = _merge_unique_list(
+            keywords,
+            getattr(paper, "keywords", None),
+            getattr(paper, "ai_keywords", None),
+            getattr(paper, "faculty_keywords", None),
+            getattr(paper, "themes", None),
+        )
+    return keywords
 
 
 def _score_network_item(
@@ -47,15 +138,17 @@ def _score_network_item(
         .intersection({item.lower() for item in _normalize_keyword_list(my_schools)})
     )
 
-    score = 38
+    score = 30
     if not my_keyword_set:
-        score = 45
-    score += min(36, len(shared_keywords) * 12)
-    if department_match:
-        score += 12
-    if school_match:
+        score = 36
+    score += min(42, len(shared_keywords) * 14)
+    if shared_keywords and not department_match:
         score += 8
-    score += min(10, richness * 2)
+    if department_match:
+        score += 5 if shared_keywords else 2
+    if school_match:
+        score += 4 if shared_keywords else 2
+    score += min(8, richness * 2)
     return min(96, score), shared_keywords[:6], department_match, school_match
 
 
@@ -65,11 +158,11 @@ def _network_reason(shared_keywords, department_match, school_match, fallback):
     if shared_keywords and school_match:
         return f"Shared expertise in {', '.join(shared_keywords[:3])} within a related school."
     if shared_keywords:
-        return f"Shared expertise in {', '.join(shared_keywords[:3])}."
+        return f"Cross-disciplinary overlap in {', '.join(shared_keywords[:3])}."
     if department_match:
-        return "Potential fit based on department alignment."
+        return "Weak fit based only on department alignment."
     if school_match:
-        return "Potential fit based on school alignment."
+        return "Weak fit based only on school alignment."
     return fallback
 
 
@@ -95,6 +188,8 @@ def _blend_search_and_collaboration_score(search_confidence, collaboration_score
 def _combined_internal_reason(search_reason, collaboration_reason):
     search_reason = str(search_reason or "").strip()
     collaboration_reason = str(collaboration_reason or "").strip()
+    if collaboration_reason.startswith("Search relevance is strong"):
+        return search_reason or "Matches your collaboration idea based on available SCOUP data."
     if search_reason and collaboration_reason:
         return f"{search_reason} Collaboration fit: {collaboration_reason}"
     return search_reason or collaboration_reason or "Potential collaboration fit based on available SU data."
@@ -119,7 +214,7 @@ def _network_fit(candidate_keywords, candidate_departments, candidate_schools, m
     return score, shared, reason
 
 
-def _network_payload_from_unified_search(search_payload, faculty, my_keywords, my_departments, my_schools, request, limit):
+def _network_payload_from_unified_search(search_payload, faculty, my_keywords, my_departments, my_schools, request, limit, collaboration_intent=None):
     base_results = search_payload.get("results", [])
     ids_by_type = {
         "faculty": [],
@@ -177,7 +272,7 @@ def _network_payload_from_unified_search(search_payload, faculty, my_keywords, m
                 continue
             departments = _faculty_department_names(item)
             schools = _faculty_school_names(item)
-            keywords = _merge_unique_list(item.keywords, item.faculty_keywords, item.ai_keywords, item.themes)
+            keywords = _faculty_network_keywords(item)
             fit_score, shared, fit_reason = _network_fit(
                 keywords,
                 departments,
@@ -253,9 +348,9 @@ def _network_payload_from_unified_search(search_payload, faculty, my_keywords, m
                     "relevanceReason": _combined_internal_reason(search_reason, fit_reason),
                     "searchConfidence": search_confidence,
                     "collaborationScore": fit_score,
-                    "isOpenToCollaboration": item.is_open_to_collaboration,
-                    "collaborationInvitation": item.collaboration_invitation or "",
-                    "allowStudentInterest": item.allow_student_interest,
+                    "isOpenToCollaboration": getattr(item, "is_open_to_collaboration", False),
+                    "collaborationInvitation": getattr(item, "collaboration_invitation", "") or "",
+                    "allowStudentInterest": getattr(item, "allow_student_interest", False),
                 }
             )
 
@@ -348,7 +443,10 @@ def _network_payload_from_unified_search(search_payload, faculty, my_keywords, m
             )
 
     return {
-        "query": search_payload.get("query", ""),
+        "query": (collaboration_intent or {}).get("originalQuery") or search_payload.get("query", ""),
+        "expandedQuery": (collaboration_intent or {}).get("expandedQuery") or search_payload.get("query", ""),
+        "suggestedCategories": (collaboration_intent or {}).get("suggestedCategories", []),
+        "expandedTerms": (collaboration_intent or {}).get("expandedTerms", []),
         "limit": limit,
         "profileKeywords": my_keywords,
         "searchMode": "unified_with_collaboration",
@@ -431,9 +529,12 @@ def public_search_data(request):
                 "departmentAffiliations": departments,
                 "school": schools[0] if schools else "",
                 "schoolAffiliations": schools,
-                "email": item.email or "",
+                "email": item.email if getattr(item, "show_email_publicly", False) else "",
+                "phone": item.phone if getattr(item, "show_phone_publicly", False) else "",
                 "photo": photo_url,
                 "bio": item.bio or "",
+                "qualifications": item.qualifications or [],
+                "allowMessagesViaSCOUP": getattr(item, "allow_messages_through_scoup", True),
                 "researchInterests": merged_keywords[:8],
                 "aiKeywords": merged_keywords,
                 "metricsProfile": {
@@ -559,12 +660,13 @@ def network_discovery(request):
         limit = 25 if query else 5
     limit = max(1, min(limit, 50))
 
-    my_keywords = list(_keywords_for_matching(faculty))
+    my_keywords = _faculty_network_keywords(faculty)
     my_departments = _faculty_department_names(faculty)
     my_schools = _faculty_school_names(faculty)
 
     if query:
-        search_payload = run_search(query, request)
+        collaboration_intent = _collaboration_intent_query(query)
+        search_payload = run_search(collaboration_intent["expandedQuery"], request)
         return Response(
             _network_payload_from_unified_search(
                 search_payload,
@@ -574,6 +676,7 @@ def network_discovery(request):
                 my_schools,
                 request,
                 limit,
+                collaboration_intent,
             )
         )
 
@@ -596,7 +699,7 @@ def network_discovery(request):
         )
         departments = _faculty_department_names(item)
         schools = _faculty_school_names(item)
-        keywords = _merge_unique_list(item.keywords, item.faculty_keywords, item.ai_keywords, item.themes)
+        keywords = _faculty_network_keywords(item)
         if not _matches_query(
             [name, item.email, item.title, item.bio, *departments, *schools, *keywords],
             query,
@@ -623,6 +726,8 @@ def network_discovery(request):
                 ]
             ),
         )
+        if my_keywords and not shared and score < 50:
+            continue
         colleagues.append(
             {
                 "id": str(item.id),

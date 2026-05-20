@@ -7,6 +7,10 @@ from rest_framework.response import Response
 from .models import AdminAuditLog, CollaborationInquiry, Faculty, Project
 
 
+def _admin_display_name(user):
+    return f"{user.first_name or ''} {user.last_name or ''}".strip() or user.get_username()
+
+
 def _full_name(first_name, last_name, fallback=""):
     return f"{(first_name or '').strip()} {(last_name or '').strip()}".strip() or fallback
 
@@ -20,8 +24,14 @@ def _faculty_display_name(faculty):
 
 
 def _inquiry_payload(inq):
-    faculty = inq.from_faculty
-    if faculty:
+    if inq.source_type == CollaborationInquiry.SOURCE_ADMIN:
+        # Admin→Faculty direct message
+        sender_admin = inq.sender_admin
+        sender_name = _admin_display_name(sender_admin) if sender_admin else "Admin"
+        sender_email = sender_admin.email if sender_admin else ""
+        sender_dept = "Administration"
+    elif inq.from_faculty:
+        faculty = inq.from_faculty
         sender_name = _faculty_display_name(faculty)
         sender_email = faculty.email or ""
         sender_dept = faculty.department or ""
@@ -39,6 +49,7 @@ def _inquiry_payload(inq):
         "from_faculty_name": sender_name,
         "from_faculty_email": sender_email,
         "from_faculty_department": sender_dept,
+        "message_subject": inq.message_subject,
         "target_faculty_name": inq.target_faculty_name,
         "target_faculty_id": inq.target_faculty_id,
         "target_department": inq.target_department,
@@ -153,7 +164,7 @@ def submit_collaboration_inquiry(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def faculty_collaboration_inquiries(request):
-    """Logged-in faculty list inquiries aimed at their profile or projects."""
+    """Logged-in faculty list inquiries aimed at their profile or projects, including admin messages."""
     faculty = Faculty.objects.filter(user=request.user).first()
     if not faculty:
         return Response({"detail": "Faculty profile not found."}, status=404)
@@ -161,14 +172,16 @@ def faculty_collaboration_inquiries(request):
     faculty_name = _faculty_display_name(faculty)
     project_ids = list(faculty.projects.values_list("id", flat=True))
     qs = (
-        CollaborationInquiry.objects.select_related("from_faculty", "target_project")
+        CollaborationInquiry.objects.select_related("from_faculty", "target_project", "sender_admin", "recipient_faculty")
         .filter(
             Q(target_faculty_id=str(faculty.id))
             | Q(target_faculty_id=faculty.faculty_id or "")
             | Q(target_faculty_name__iexact=faculty_name)
             | Q(target_project_id__in=project_ids)
+            | Q(recipient_faculty=faculty)
         )
         .distinct()
+        .order_by("-created_at")
     )
     return Response({"count": qs.count(), "results": [_inquiry_payload(inq) for inq in qs]})
 
@@ -211,8 +224,8 @@ def admin_collaboration_inquiries(request):
         return Response({"detail": "Forbidden."}, status=403)
 
     source_filter = request.query_params.get("source", "")
-    qs = CollaborationInquiry.objects.select_related("from_faculty", "target_project").all()
-    if source_filter in ("faculty", "external"):
+    qs = CollaborationInquiry.objects.select_related("from_faculty", "target_project", "sender_admin", "recipient_faculty").all()
+    if source_filter in ("faculty", "external", "admin"):
         qs = qs.filter(source_type=source_filter)
 
     data = [_inquiry_payload(inq) for inq in qs]
@@ -254,4 +267,63 @@ def admin_update_inquiry(request, pk):
             "admin_notes": inquiry.admin_notes,
             "reviewed_by": inquiry.reviewed_by,
         }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def admin_send_faculty_message(request, faculty_id):
+    """Admin sends a direct message to a specific faculty member.
+
+    The message appears in the faculty's Inquiries inbox with source_type='admin'.
+    Required body fields: note (message body)
+    Optional: message_subject
+    """
+    if not request.user.is_staff:
+        return Response({"detail": "Forbidden."}, status=403)
+
+    try:
+        recipient = Faculty.objects.get(pk=faculty_id)
+    except Faculty.DoesNotExist:
+        return Response({"detail": "Faculty not found."}, status=404)
+
+    note = (request.data.get("note") or "").strip()
+    if not note:
+        return Response({"detail": "Message body (note) is required."}, status=400)
+
+    subject = (request.data.get("message_subject") or "").strip()
+    u = request.user
+    admin_name = _admin_display_name(u)
+    recipient_name = _faculty_display_name(recipient)
+
+    inquiry = CollaborationInquiry.objects.create(
+        source_type=CollaborationInquiry.SOURCE_ADMIN,
+        sender_admin=u,
+        recipient_faculty=recipient,
+        message_subject=subject,
+        note=note,
+        # Populate target fields so existing payload/filter logic works
+        target_faculty_name=recipient_name,
+        target_faculty_id=str(recipient.id),
+        target_department=recipient.department or "",
+        target_school=recipient.school or "",
+        status=CollaborationInquiry.STATUS_PENDING,
+    )
+
+    AdminAuditLog.objects.create(
+        admin_username=u.get_username(),
+        admin_display_name=admin_name,
+        action=AdminAuditLog.ACTION_UPDATE_INQUIRY,
+        target_type="faculty",
+        target_id=recipient.id,
+        target_name=recipient_name,
+        notes=f"Admin message sent: {subject or '(no subject)'}",
+    )
+
+    return Response(
+        {
+            "id": inquiry.id,
+            "message": f"Message sent to {recipient_name}.",
+        },
+        status=201,
     )

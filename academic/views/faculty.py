@@ -10,7 +10,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from ..models import Faculty, FacultySuggestionDecision, Paper, PaperAuthorship, Patent, Project
+from ..models import Faculty, FacultySuggestionDecision, FacultyPortalMessage, Paper, PaperAuthorship, Patent, Project
 from ..serializers import FacultyProfileSerializer, FacultySerializer
 from .utils import (
     _normalize_keyword_list,
@@ -578,3 +578,97 @@ class FacultyPhotoUploadView(APIView):
             "message": "Photo updated",
             "photo": request.build_absolute_uri(faculty.photo.url)
         })
+
+
+# ─── Faculty Portal Messaging ────────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def portal_messages_inbox(request):
+    """List messages received by the current faculty member."""
+    faculty = _get_request_faculty(request.user)
+    if not faculty:
+        return Response({"error": "Faculty profile not found."}, status=404)
+    msgs = FacultyPortalMessage.objects.filter(recipient=faculty).select_related("sender")
+    results = [
+        {
+            "id": m.id,
+            "sender_id": m.sender.id,
+            "sender_name": m.sender.name or f"{m.sender.first_name or ''} {m.sender.last_name or ''}".strip() or m.sender.faculty_id,
+            "sender_department": (m.sender.departments.first().name if m.sender.departments.exists() else m.sender.department or ""),
+            "subject": m.subject or "(No subject)",
+            "body": m.body,
+            "is_read": m.is_read,
+            "created_at": m.created_at.isoformat(),
+        }
+        for m in msgs
+    ]
+    return Response({"results": results})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def portal_messages_sent(request):
+    """List messages sent by the current faculty member."""
+    faculty = _get_request_faculty(request.user)
+    if not faculty:
+        return Response({"error": "Faculty profile not found."}, status=404)
+    msgs = FacultyPortalMessage.objects.filter(sender=faculty).select_related("recipient")
+    results = [
+        {
+            "id": m.id,
+            "recipient_id": m.recipient.id,
+            "recipient_name": m.recipient.name or f"{m.recipient.first_name or ''} {m.recipient.last_name or ''}".strip() or m.recipient.faculty_id,
+            "recipient_department": (m.recipient.departments.first().name if m.recipient.departments.exists() else m.recipient.department or ""),
+            "subject": m.subject or "(No subject)",
+            "body": m.body,
+            "created_at": m.created_at.isoformat(),
+        }
+        for m in msgs
+    ]
+    return Response({"results": results})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def portal_messages_send(request):
+    """Send a portal message from the current faculty to another faculty member."""
+    faculty = _get_request_faculty(request.user)
+    if not faculty:
+        return Response({"error": "Faculty profile not found."}, status=404)
+    recipient_id = request.data.get("recipient_id")
+    subject = (request.data.get("subject") or "").strip()
+    body = (request.data.get("body") or "").strip()
+    if not recipient_id:
+        return Response({"error": "recipient_id is required."}, status=400)
+    if not body:
+        return Response({"error": "Message body is required."}, status=400)
+    if str(recipient_id) == str(faculty.id):
+        return Response({"error": "You cannot send a message to yourself."}, status=400)
+    try:
+        recipient = Faculty.objects.get(id=recipient_id, is_approved=True, profile_visibility=True)
+    except Faculty.DoesNotExist:
+        return Response({"error": "Recipient not found."}, status=404)
+    msg = FacultyPortalMessage.objects.create(
+        sender=faculty,
+        recipient=recipient,
+        subject=subject,
+        body=body,
+    )
+    return Response({"id": msg.id, "message": "Message sent."}, status=201)
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def portal_message_mark_read(request, pk):
+    """Mark a received message as read."""
+    faculty = _get_request_faculty(request.user)
+    if not faculty:
+        return Response({"error": "Faculty profile not found."}, status=404)
+    try:
+        msg = FacultyPortalMessage.objects.get(id=pk, recipient=faculty)
+    except FacultyPortalMessage.DoesNotExist:
+        return Response({"error": "Message not found."}, status=404)
+    msg.is_read = True
+    msg.save(update_fields=["is_read"])
+    return Response({"id": msg.id, "is_read": True})

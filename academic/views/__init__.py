@@ -42,6 +42,10 @@ from .faculty import (
     faculty_suggestion_preview,
     reject_faculty_suggestion,
     FacultyPhotoUploadView,
+    portal_messages_inbox,
+    portal_messages_sent,
+    portal_messages_send,
+    portal_message_mark_read,
 )
 from .paper import (
     PaperListCreateView,

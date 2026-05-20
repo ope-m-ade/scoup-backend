@@ -5,10 +5,18 @@ from . import views
 from .auth import EmailOrUsernameTokenObtainPairView
 from .inquiry_views import (
     admin_collaboration_inquiries,
+    admin_send_faculty_message,
     admin_update_inquiry,
     faculty_collaboration_inquiries,
     faculty_update_inquiry,
     submit_collaboration_inquiry,
+)
+from .ticket_views import (
+    faculty_submit_ticket,
+    faculty_list_tickets,
+    admin_list_tickets,
+    admin_update_ticket,
+    public_submit_ticket,
 )
 from .views import (
     send_institutional_otp,
@@ -67,6 +75,10 @@ from .views import (
     category_detail,
     query_expansions,
     change_password,
+    portal_messages_inbox,
+    portal_messages_sent,
+    portal_messages_send,
+    portal_message_mark_read,
 )
 from rest_framework_simplejwt.views import (
     TokenRefreshView,
@@ -132,12 +144,24 @@ urlpatterns = [
     path("admin/contact/settings/", admin_contact_settings, name="admin-contact-settings"),
     path("admin/contact/team/<int:pk>/photo/", admin_contact_team_photo_upload, name="admin-contact-team-photo"),
 
+    # Support Tickets
+    path("support/ticket/", public_submit_ticket, name="public-submit-ticket"),
+    path("faculty/tickets/", faculty_list_tickets, name="faculty-ticket-list"),
+    path("faculty/tickets/submit/", faculty_submit_ticket, name="faculty-ticket-submit"),
+    path("admin/tickets/", admin_list_tickets, name="admin-ticket-list"),
+    path("admin/tickets/<int:pk>/", admin_update_ticket, name="admin-ticket-detail"),
+
     # Collaboration Inquiries
     path("network/inquire/", submit_collaboration_inquiry, name="submit-collaboration-inquiry"),
     path("faculty/inquiries/", faculty_collaboration_inquiries, name="faculty-collaboration-inquiries"),
     path("faculty/inquiries/<int:pk>/", faculty_update_inquiry, name="faculty-update-inquiry"),
+    path("faculty/portal-messages/inbox/", portal_messages_inbox, name="portal-messages-inbox"),
+    path("faculty/portal-messages/sent/", portal_messages_sent, name="portal-messages-sent"),
+    path("faculty/portal-messages/send/", portal_messages_send, name="portal-messages-send"),
+    path("faculty/portal-messages/<int:pk>/read/", portal_message_mark_read, name="portal-message-mark-read"),
     path("admin/inquiries/", admin_collaboration_inquiries, name="admin-collaboration-inquiries"),
     path("admin/inquiries/<int:pk>/", admin_update_inquiry, name="admin-update-inquiry"),
+    path("admin/faculty/<int:faculty_id>/message/", admin_send_faculty_message, name="admin-send-faculty-message"),
 
     # Schools & Departments
     path("admin/schools/", AdminSchoolListCreateView.as_view(), name="admin-school-list"),

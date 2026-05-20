@@ -20,17 +20,22 @@ Score contract used for every result type:
   60  all query terms in abstract/description/department
   40-85 semantic embedding match
   <40 filtered out
+
+For queries that match an existing department name, faculty in that department
+receive a small boost and faculty outside that department receive a small
+penalty. This keeps "computer science" style searches from being dominated by
+keyword-only matches from unrelated departments.
 """
 
 import ast
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Iterable
 
 from django.db import OperationalError
 
-from .models import Faculty, Paper, Patent, Project
+from .models import Department, Faculty, Paper, Patent, Project
 from .semantic import cosine_similarity, create_query_embedding
 
 
@@ -47,6 +52,8 @@ STOPWORDS = {
 
 MIN_SCORE = 40
 SEMANTIC_THRESHOLD = 0.22
+DEPARTMENT_QUERY_MATCH_BONUS = 5
+DEPARTMENT_QUERY_MISMATCH_PENALTY = 8
 
 # Query expansion — maps common abbreviations and informal terms to their
 # full NSF taxonomy equivalents so search works even without exact wording.
@@ -214,6 +221,55 @@ def faculty_department_names(faculty) -> list[str]:
         names.append(faculty.primary_department.name)
     names.extend([department.name for department in faculty.departments.all()])
     return merge_unique_list(names)
+
+
+def department_matches_query(department_names: list[str], query_phrase: str, words: list[str]) -> bool:
+    for department_name in department_names:
+        if phrase_in_text(query_phrase, department_name) or words_in_text(words, department_name):
+            return True
+    return False
+
+
+def query_targets_department(raw_query: str, words: list[str]) -> bool:
+    query_phrase = normalize_text(raw_query)
+    if len(query_phrase) < 3:
+        return False
+
+    for department in Department.objects.filter(is_active=True).only("name"):
+        department_name = department.name or ""
+        department_norm = normalize_text(department_name)
+        if not department_norm:
+            continue
+        if phrase_in_text(query_phrase, department_name) or words_in_text(words, department_name):
+            return True
+        if len(query_phrase) >= 8 and text_similarity(query_phrase, department_norm) >= 0.9:
+            return True
+    return False
+
+
+def adjust_faculty_department_query_evidence(
+    evidence: Evidence,
+    department_names: list[str],
+    query_phrase: str,
+    words: list[str],
+    is_department_query: bool,
+) -> Evidence:
+    if not is_department_query:
+        return evidence
+
+    if department_matches_query(department_names, query_phrase, words):
+        return replace(
+            evidence,
+            score=min(99, evidence.score + DEPARTMENT_QUERY_MATCH_BONUS),
+        )
+
+    if evidence.field == "name":
+        return evidence
+
+    return replace(
+        evidence,
+        score=max(MIN_SCORE, evidence.score - DEPARTMENT_QUERY_MISMATCH_PENALTY),
+    )
 
 
 def words_in_text(words: Iterable[str], text: str) -> bool:
@@ -561,7 +617,7 @@ def project_result(project, evidence: Evidence) -> dict:
     }
 
 
-def score_faculty(phrase: str, words: list[str], request) -> list[dict]:
+def score_faculty(phrase: str, words: list[str], request, is_department_query: bool = False) -> list[dict]:
     results = []
     faculty_qs = (
         Faculty.objects
@@ -591,6 +647,13 @@ def score_faculty(phrase: str, words: list[str], request) -> list[dict]:
             ],
         )
         if evidence and evidence.score >= MIN_SCORE:
+            evidence = adjust_faculty_department_query_evidence(
+                evidence,
+                dept_names,
+                phrase,
+                words,
+                is_department_query,
+            )
             results.append(faculty_result(faculty, evidence, request))
     return results
 
@@ -743,7 +806,7 @@ def run_search(query: str, request) -> dict:
         return {"results": [], "count": 0, "query": query}
 
     results = []
-    results.extend(score_faculty(phrase, words, request))
+    results.extend(score_faculty(phrase, words, request, query_targets_department(query, words)))
     results.extend(score_papers(query, phrase, words))
     results.extend(score_patents(phrase, words))
     results.extend(score_projects(phrase, words))
