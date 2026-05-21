@@ -76,9 +76,9 @@ Minimum score to appear in results: **40**
 
 For queries that match an active department name, faculty department matches are protected:
 
-- Faculty in the matching department receive a small confidence boost.
-- Faculty outside the matching department receive a small confidence penalty unless the match is a faculty name.
-- This is intentionally narrow so topical searches like "machine learning" can still find interdisciplinary faculty, while department searches like "computer science" favor faculty actually affiliated with Computer Science.
+-   Faculty in the matching department receive a small confidence boost.
+-   Faculty outside the matching department receive a small confidence penalty unless the match is a faculty name.
+-   This is intentionally narrow so topical searches like "machine learning" can still find interdisciplinary faculty, while department searches like "computer science" favor faculty actually affiliated with Computer Science.
 
 ### Fields Searched Per Result Type
 
